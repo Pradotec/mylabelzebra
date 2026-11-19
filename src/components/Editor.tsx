@@ -4,7 +4,9 @@ import type Konva from 'konva';
 import { useStore } from '../store';
 import type { LabelElement, TableEl } from '../types';
 import { BASE_DPI } from '../types';
-import { renderElementCanvas, elementHeight, hasFixedHeight, tableColumns, tableRows, fontString, renderLabel, labelSizeDots, type DrawCtx } from '../render/draw';
+import { renderElementCanvas, elementHeight, hasFixedHeight, tableColumns, tableRows, fontString, renderLabel, labelSizeDots, incoCheck, incoIndices, isIncoMandatory, flowElements, rollColumns, rollGeometryU, type DrawCtx } from '../render/draw';
+import { SideDialogs } from './SideDialogs';
+import { keepsRatio } from '../render/codes';
 import { shapeDef } from '../render/shapes';
 import { conditionHolds } from '../render/resolve';
 import { promptsVersion, onPromptsChange } from '../prompts';
@@ -211,6 +213,39 @@ export function Editor() {
 
   const heightOf = (el: LabelElement) => rendered.get(el.id)?.h ?? elementHeight(el, rctx);
 
+  // repères INCO : mention obligatoire dont la hauteur de x imprimée passe sous le seuil
+  // (rouge plein : ligne affichée ; orange pointillé : d'autres lignes de données seulement)
+  const incoMarks = useMemo(() => {
+    if (preview || !doc.elements.some((e) => isIncoMandatory(e))) return [];
+    const idx = incoIndices(doc, 500);
+    if (!idx.includes(previewRow)) idx.push(previewRow);
+    const out: { el: LabelElement; current: boolean }[] = [];
+    for (const el of doc.elements)
+      if (isIncoMandatory(el) && !el.hidden) {
+        const r = incoCheck(el, doc, idx);
+        if (r.failing.length) out.push({ el, current: r.failing.includes(previewRow) });
+      }
+    return out;
+  }, [doc, previewRow, preview]);
+
+  // aperçu : positions effectives (ancres verticales « remonter sous… » appliquées pour la ligne affichée)
+  const flowY = useMemo(() => {
+    if (!preview || !doc.elements.some((e) => e.anchorTo)) return null;
+    return new Map(flowElements(doc, rctx).map((e) => [e.id, e.y]));
+  }, [preview, doc, rctx, pv]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // rouleau à plusieurs étiquettes de front : étiquettes voisines en aperçu (lignes suivantes du lot)
+  const rollGhosts = useMemo(() => {
+    if (rollColumns(doc) < 2) return null;
+    const geo = rollGeometryU(doc);
+    const n = doc.data?.rows.length ?? 0;
+    const items = geo.offsets.slice(1).map((off, k) => {
+      const index = n ? Math.min(n - 1, previewRow + k + 1) : previewRow;
+      return { x: off - geo.offsets[0], canvas: renderLabel(doc, { index, scale: Math.min(pixelScale, 2) }) };
+    });
+    return { geo, items };
+  }, [doc, previewRow, pixelScale, imgVersion, pv]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const selEls = doc.elements.filter((e) => selected.includes(e.id) && !e.hidden);
   const transformable = selEls.filter((e) => !e.locked);
 
@@ -228,8 +263,9 @@ export function Editor() {
   const keepRatio =
     !!single &&
     (single.type === 'qr' ||
-      (single.type === 'barcode' && single.symbology === 'datamatrix') ||
+      (single.type === 'barcode' && keepsRatio(single.symbology)) ||
       (single.type === 'image' && single.keepRatio) ||
+      (single.type === 'mark' && single.kind === 'estimated') ||
       (single.type === 'shape' && (shapeDef(single.kind)?.category !== 'forme' || (shapeDef(single.kind) as { square?: boolean })?.square)));
   const autoHeightText = !!single && single.type === 'text' && !hasFixedHeight(single);
 
@@ -666,6 +702,14 @@ export function Editor() {
         onContextMenu={onContextMenu}
       >
         <Layer imageSmoothingEnabled={!thermalCanvas}>
+          {rollGhosts && (
+            <Group x={ox} y={oy} scaleX={zoom} scaleY={zoom} listening={false} name="roll-preview">
+              <Rect x={-rollGhosts.geo.left} y={-6 / zoom} width={rollGhosts.geo.totalW} height={H + 12 / zoom} fill="rgba(22,33,62,0.05)" stroke="#b8c0d4" strokeWidth={1 / zoom} dash={[6 / zoom, 4 / zoom]} />
+              {rollGhosts.items.map((g, k) => (
+                <KImage key={k} image={g.canvas} x={g.x} y={0} width={W} height={H} opacity={0.5} />
+              ))}
+            </Group>
+          )}
           <Group x={ox} y={oy}>
             {doc.round ? (
               <Ellipse x={(W * zoom) / 2} y={(H * zoom) / 2} radiusX={(W * zoom) / 2} radiusY={(H * zoom) / 2} fill={doc.background || '#fff'} shadowColor="#16213e" shadowBlur={24} shadowOpacity={0.14} shadowOffsetY={6} />
@@ -702,7 +746,7 @@ export function Editor() {
                   id={el.id}
                   name="el"
                   x={el.x}
-                  y={el.y}
+                  y={flowY?.get(el.id) ?? el.y}
                   width={el.w}
                   height={r.h}
                   rotation={el.rotation}
@@ -717,6 +761,24 @@ export function Editor() {
           {!preview && (
             <Group x={ox} y={oy} scaleX={zoom} scaleY={zoom} listening={false}>
               {doc.round && <Rect width={W} height={H} stroke="#b8c0d4" strokeWidth={1 / zoom} dash={[4 / zoom, 4 / zoom]} />}
+              {incoMarks.map(({ el, current }) => {
+                const b = aabb(el, heightOf(el));
+                const p = 3 / zoom;
+                return (
+                  <Rect
+                    key={'inco' + el.id}
+                    name="inco-mark"
+                    x={b.x - p}
+                    y={b.y - p}
+                    width={b.w + 2 * p}
+                    height={b.h + 2 * p}
+                    stroke={current ? '#e53e3e' : '#f5a524'}
+                    strokeWidth={(current ? 2 : 1.5) / zoom}
+                    dash={current ? undefined : [6 / zoom, 4 / zoom]}
+                    fill={current ? 'rgba(229,62,62,0.06)' : undefined}
+                  />
+                );
+              })}
               {selEls
                 .filter((e) => e.locked || selEls.length > 1)
                 .map((e) => {
@@ -790,6 +852,7 @@ export function Editor() {
       )}
       {editCell && <CellOverlay cell={editCell} ox={ox} oy={oy} zoom={zoom} onDone={() => setEditCell(null)} />}
       {ctxMenu && <ContextMenu state={ctxMenu} onClose={() => setCtxMenu(null)} />}
+      <SideDialogs />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useStore } from './store';
 import { newDoc, makeBarcode, makeQr, makeText } from './elements';
-import { SYMBOLOGIES } from './render/codes';
+import { SYMBOLOGIES, is2D } from './render/codes';
 import type { Symbology, LabelElement } from './types';
 import { BASE_DPI } from './types';
 import { t } from './i18n';
@@ -22,7 +22,33 @@ const ALIASES: Record<string, Symbology> = {
   sscc: 'sscc18',
   codabar: 'rationalizedCodabar',
   datamatrix: 'datamatrix',
+  dm: 'datamatrix',
+  pdf417: 'pdf417',
+  aztec: 'azteccode',
+  azteccode: 'azteccode',
+  gs1datamatrix: 'gs1datamatrix',
+  'gs1-datamatrix': 'gs1datamatrix',
+  gs1dm: 'gs1datamatrix',
+  gs1qrcode: 'gs1qrcode',
+  'gs1-qr': 'gs1qrcode',
+  gs1qr: 'gs1qrcode',
+  gs1dlqrcode: 'gs1dlqrcode',
+  'gs1-digital-link': 'gs1dlqrcode',
+  digitallink: 'gs1dlqrcode',
+  databaromni: 'databaromni',
+  databar: 'databaromni',
+  'gs1-databar': 'databaromni',
+  databarstackedomni: 'databarstackedomni',
+  databarstacked: 'databarstackedomni',
+  databarexpanded: 'databarexpanded',
+  'gs1-databar-expanded': 'databarexpanded',
 };
+
+/** Symbologie d'après le paramètre « type » (alias, ou identifiant interne sans tenir compte de la casse) */
+export function symbologyFromParam(v: string | null): Symbology {
+  const ty = (v || 'code128').trim().toLowerCase();
+  return ALIASES[ty] ?? SYMBOLOGIES.find((s) => s.id.toLowerCase() === ty)?.id ?? 'code128';
+}
 
 /**
  * Liens pré-remplis :
@@ -62,9 +88,16 @@ export function applyUrlParams() {
     els.push(b);
   }
   if (p.has('barcode')) {
-    const ty = (p.get('type') || 'code128').toLowerCase();
-    const sym = ALIASES[ty] ?? (SYMBOLOGIES.some((s) => s.id === ty) ? (ty as Symbology) : 'code128');
+    const sym = symbologyFromParam(p.get('type'));
     const b = makeBarcode(doc, sym, p.get('barcode')!);
+    if (is2D(sym) && !p.has('qr')) {
+      // code 2D : carré (ou proportions par défaut) centré dans l'étiquette
+      const k = Math.min((W * 0.85) / b.w, (H * 0.85) / b.h);
+      b.w *= k;
+      b.h *= k;
+      b.x = (W - b.w) / 2;
+      b.y = (H - b.h) / 2;
+    }
     if (p.has('qr')) {
       b.w = W * 0.55;
       b.x = W * 0.04;

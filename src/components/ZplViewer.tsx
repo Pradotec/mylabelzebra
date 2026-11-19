@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ScanLine, FileUp, Copy, Download, Printer, PenSquare, RefreshCw } from 'lucide-react';
 import { useStore } from '../store';
 import { Modal, NumField, Seg } from './ui';
 import { t } from '../i18n';
-import { parseZpl, renderZplLabel, zplLabelToElements, type ZLabel } from '../zpl/parse';
+import { parseZpl, renderZplLabel, zplLabelToElements, lintZpl, type ZLabel } from '../zpl/parse';
 import { generateBatchZpl } from '../zpl/generate';
 import { copyText, downloadText, pickFile, safeFileName } from '../util';
 import { sendToZebra } from '../actions';
@@ -42,6 +42,7 @@ export function ZplViewer() {
   }, [code]);
 
   const lab = labels[page];
+  const lint = useMemo(() => lintZpl(code), [code]);
   const d = +dpi;
   useEffect(() => {
     const box = boxRef.current;
@@ -107,7 +108,7 @@ export function ZplViewer() {
         <div>
           <textarea className="inp code" spellCheck={false} value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.stopPropagation()} style={{ height: '52vh', fontSize: 11.5, whiteSpace: 'pre', overflow: 'auto' }} aria-label={t('Code ZPL')} />
           <div className="hint" style={{ marginTop: 6 }}>
-            {t('{n} caractères', { n: code.length })} · {t('Collez votre ZPL ou ouvrez un fichier. Commandes prises en charge : ^FO ^FT ^A ^CF ^FD ^FB ^FR ^GB ^GE ^GC ^BC ^BE ^B8 ^BU ^B3 ^BA ^B2 ^BQ ^BX ^GFA ^LH ^PW ^LL.')}
+            {t('{n} caractères', { n: code.length })} · {t('Collez votre ZPL ou ouvrez un fichier. Commandes prises en charge : ^FO ^FT ^A ^CF ^FD ^FB ^FR ^GB ^GE ^GC ^BC ^BE ^B8 ^BU ^B3 ^BA ^B2 ^BQ ^BX ^GFA ^LH ^PW ^LL.')} {t('Également : ^BO (Aztec), ^B7 (PDF417), ^BX GS1 (FNC1).')}
           </div>
         </div>
         <div>
@@ -135,6 +136,18 @@ export function ZplViewer() {
           )}
           <div ref={boxRef} style={{ background: 'var(--bg)', borderRadius: 12, minHeight: 240, display: 'grid', placeItems: 'center', padding: 12 }} />
           {err && <div className="err" style={{ marginTop: 8 }}>{err}</div>}
+          {lint.length > 0 && (
+            <div style={{ marginTop: 8, maxHeight: '18vh', overflow: 'auto' }} aria-label={t('Vérification du ZPL')}>
+              <div className="sec-t" style={{ margin: '0 0 4px' }}>
+                {t('Vérification : {e} erreur(s), {w} avertissement(s)', { e: lint.filter((x) => x.level === 'error').length, w: lint.filter((x) => x.level === 'warning').length })}
+              </div>
+              {lint.slice(0, 200).map((x, i) => (
+                <div key={i} className={x.level === 'error' ? 'err' : 'hint'} style={{ marginTop: 2 }}>
+                  {t('Ligne {n}', { n: x.line })} : {x.msg}
+                </div>
+              ))}
+            </div>
+          )}
           {lab?.warnings.map((w, i) => (
             <div key={i} className="hint" style={{ marginTop: 6 }}>
               ⚠ {w}

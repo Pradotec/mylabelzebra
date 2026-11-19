@@ -92,9 +92,29 @@ export async function listPrinters(): Promise<ZebraDevice[]> {
   }
 }
 
-export async function write(device: ZebraDevice, data: string): Promise<void> {
-  const r = await call('/write', { method: 'POST', body: JSON.stringify({ device, data }), headers: { 'Content-Type': 'text/plain;charset=UTF-8' } }, 20000);
+export async function write(device: ZebraDevice, data: string, ms = 20000): Promise<void> {
+  const r = await call('/write', { method: 'POST', body: JSON.stringify({ device, data }), headers: { 'Content-Type': 'text/plain;charset=UTF-8' } }, ms);
   if (!r.ok) throw new Error('Erreur d’envoi (' + r.status + ')');
+}
+
+/** Aucune imprimante mémorisée ni par défaut dans Browser Print */
+export class NoPrinterSelected extends Error {}
+
+/** Imprimante à utiliser : la dernière choisie, sinon celle par défaut de Browser Print. */
+export async function resolvePrinter(): Promise<ZebraDevice> {
+  const dev = lastPrinter() ?? (await getDefaultPrinter());
+  if (!dev) throw new NoPrinterSelected();
+  return dev;
+}
+
+/**
+ * Envoie un programme ZPL tel quel (aucun préambule de réglages, aucune réécriture) :
+ * étiquettes transporteur importées. Délai d'envoi proportionnel à la taille.
+ */
+export async function sendRaw(data: string): Promise<ZebraDevice> {
+  const dev = await resolvePrinter();
+  await write(dev, data, Math.max(20000, Math.ceil(data.length / 20000) * 1000));
+  return dev;
 }
 
 export async function read(device: ZebraDevice): Promise<string> {

@@ -1,9 +1,10 @@
 import { useRef } from 'react';
-import { Copy, ClipboardPaste, CopyPlus, Trash2, BringToFront, SendToBack, Group, Ungroup, Lock, Unlock, BoxSelect, ImagePlus, ArrowLeft, ArrowRight, ArrowUp, ArrowDown } from 'lucide-react';
+import { Copy, ClipboardPaste, CopyPlus, Trash2, BringToFront, SendToBack, Group, Ungroup, Lock, Unlock, BoxSelect, ImagePlus, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Stamp, Images, ClipboardCheck } from 'lucide-react';
 import { useStore } from '../store';
 import { useClickOutside } from './ui';
 import { t } from '../i18n';
-import { addImageFile } from '../actions';
+import { addImageFile, addHealthMark, addEstimatedSign } from '../actions';
+import { openSideDialog } from './SideDialogs';
 
 export interface CtxMenuState {
   x: number;
@@ -46,7 +47,7 @@ export function ContextMenu({ state, onClose }: { state: CtxMenuState; onClose: 
     onClose();
   };
   const left = Math.min(state.x, window.innerWidth - 250);
-  const top = Math.min(state.y, window.innerHeight - 440);
+  const top = Math.max(8, Math.min(state.y, window.innerHeight - (has ? 440 : 470)));
   return (
     <div ref={ref} className="menu" style={{ position: 'fixed', left, top }} role="menu">
       <button className="mi" disabled={!has} onClick={run(st.copySelected)}>
@@ -88,6 +89,24 @@ export function ContextMenu({ state, onClose }: { state: CtxMenuState; onClose: 
       <button className="mi" onClick={run(() => st.select(st.doc.elements.filter((e) => !e.hidden).map((e) => e.id)))}>
         <BoxSelect size={16} /> {t('Tout sélectionner')} <span className="k">Ctrl+A</span>
       </button>
+      {!has && (
+        <>
+          <hr />
+          <div className="mt">{t('Insérer')}</div>
+          <button className="mi" onClick={run(addHealthMark)}>
+            <Stamp size={16} /> {t('Estampille sanitaire')}
+          </button>
+          <button className="mi" onClick={run(addEstimatedSign)}>
+            <span style={{ width: 16, textAlign: 'center', fontWeight: 700 }}>℮</span> {t('Signe ℮ (quantité estimée)')}
+          </button>
+          <button className="mi" onClick={run(() => openSideDialog('pictos'))}>
+            <Images size={16} /> {t('Mes pictogrammes…')}
+          </button>
+          <button className="mi" onClick={run(() => openSideDialog('food'))}>
+            <ClipboardCheck size={16} /> {t('Conformité alimentaire…')}
+          </button>
+        </>
+      )}
       {has && (
         <>
           <hr />

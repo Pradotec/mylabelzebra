@@ -15,9 +15,33 @@ export const SYMBOLOGIES: { id: Symbology; label: string; hint: string; sample: 
   { id: 'sscc18', label: 'SSCC-18', hint: '17 chiffres : la clé est ajoutée automatiquement', sample: '00614141000000001' },
   { id: 'rationalizedCodabar', label: 'Codabar', hint: 'A…B autour de chiffres et - $ : / . +', sample: 'A123456B' },
   { id: 'datamatrix', label: 'Data Matrix', hint: 'Texte libre (2D)', sample: 'MyLabelZebra', twoD: true },
+  { id: 'gs1datamatrix', label: 'GS1 DataMatrix', hint: 'Identifiants entre parenthèses : (01)…(17)…(10)…', sample: '(01)09501101530003(17)261231(10)ABC123', twoD: true },
+  { id: 'pdf417', label: 'PDF417', hint: 'Texte libre (2D empilé)', sample: 'MyLabelZebra PDF417', twoD: true },
+  { id: 'azteccode', label: 'Aztec', hint: 'Texte libre (2D)', sample: 'MyLabelZebra', twoD: true },
+  { id: 'gs1qrcode', label: 'GS1 QR Code', hint: 'Identifiants entre parenthèses : (01)…(10)…', sample: '(01)09501101530003(10)ABC123', twoD: true },
+  { id: 'gs1dlqrcode', label: 'QR GS1 Digital Link', hint: 'URL https://domaine/01/GTIN/10/LOT?17=AAMMJJ', sample: 'https://id.gs1.org/01/09501101530003/10/ABC123?17=261231', twoD: true },
+  { id: 'databaromni', label: 'GS1 DataBar omnidirectionnel', hint: 'GTIN : 13 ou 14 chiffres, ou (01)…', sample: '(01)09501101530003' },
+  { id: 'databarstackedomni', label: 'GS1 DataBar empilé omnidirectionnel', hint: 'GTIN : 13 ou 14 chiffres, ou (01)…', sample: '(01)09501101530003', twoD: true },
+  { id: 'databarexpanded', label: 'GS1 DataBar Expanded', hint: 'Identifiants entre parenthèses : (01)…(3103)…', sample: '(01)09501101530003(3103)001250' },
 ];
 
-export const is2D = (s: Symbology) => s === 'datamatrix';
+export const is2D = (s: Symbology) => !!SYMBOLOGIES.find((x) => x.id === s)?.twoD;
+/** Symbologies dont la valeur est une chaîne GS1 « (AI)valeur… » */
+export const GS1_ELEMENT_SYMS: Symbology[] = ['gs1-128', 'gs1datamatrix', 'gs1qrcode', 'databarexpanded'];
+/** Symbologies GS1 à proportions fixes (pas de déformation libre) */
+export const keepsRatio = (s: Symbology) => is2D(s) && s !== 'pdf417';
+
+/** Niveau de correction PDF417 (0–8) choisi d'après la longueur des données — partagé écran / ^B7 */
+export function pdf417Level(data: string): number {
+  const n = data.length;
+  return n <= 40 ? 2 : n <= 160 ? 3 : n <= 320 ? 4 : 5;
+}
+/** Hauteur d'une rangée PDF417 en modules (rowmult bwip-js = paramètre h de ^B7) */
+export const PDF417_ROW_MODULES = 3;
+/** Géométrie d'un PDF417 encodé : colonnes de données et rangées */
+export function pdf417Shape(m: { cols: number; rows: number }) {
+  return { columns: Math.round((m.cols - 69) / 17), rows: Math.round(m.rows / PDF417_ROW_MODULES) };
+}
 
 export interface LinearCode {
   kind: 'linear';
@@ -121,12 +145,34 @@ export function normalizeBarcode(value: string, s: Symbology): { data: string; h
     case 'gs1-128':
       if (!/^(\(\d{2,4}\)[^()]+)+$/.test(v)) return bad(t('GS1-128 : format (AI)valeur, ex. (01)…'));
       return { data: v, human: v };
+    case 'gs1datamatrix':
+    case 'gs1qrcode':
+    case 'databarexpanded':
+      if (!/^(\(\d{2,4}\)[^()]+)+$/.test(v)) return bad(t('GS1 : format (AI)valeur, ex. (01)…'));
+      return { data: v, human: v };
+    case 'databaromni':
+    case 'databarstackedomni': {
+      const d = v.replace(/^\(01\)/, '').replace(/\s/g, '');
+      if (!/^\d+$/.test(d) || (d.length !== 13 && d.length !== 14)) return bad(t('GS1 DataBar : GTIN de 13 ou 14 chiffres'));
+      const full = d.slice(0, 13) + gs1Check(d.slice(0, 13));
+      if (d.length === 14 && full !== d) return bad(t('GS1 DataBar : clé de contrôle incorrecte'));
+      return { data: '(01)' + full, human: '(01)' + full };
+    }
+    case 'gs1dlqrcode':
+      if (!/^https?:\/\/[^/\s]+\/.+/i.test(v)) return bad(t('Digital Link : URL https://domaine/01/GTIN… attendue'));
+      return { data: v, human: v };
     default:
       return { data: v, human: v };
   }
 }
 
 const cache = new Map<string, Encoded>();
+
+/** Options bwip-js imposées (les mêmes paramètres sont repris dans le ZPL natif) */
+function bwipOptions(s: Symbology, data: string): Record<string, unknown> {
+  if (s === 'pdf417') return { eclevel: pdf417Level(data), rowmult: PDF417_ROW_MODULES };
+  return {};
+}
 
 export function encodeBarcode(value: string, s: Symbology): Encoded {
   const key = s + '\u0000' + value;
@@ -139,7 +185,7 @@ export function encodeBarcode(value: string, s: Symbology): Encoded {
     if ('error' in n) res = n as CodeError;
     else {
       try {
-        const raw = bwipjs.raw(s, n.data, {}) as unknown as Array<
+        const raw = bwipjs.raw(s, n.data, bwipOptions(s, n.data) as never) as unknown as Array<
           { sbs: number[]; bhs: number[] } & { pixs: number[]; pixx: number; pixy: number }
         >;
         const r = raw[0];
@@ -164,9 +210,10 @@ function gs1Error(msg: string): string | null {
   const ai = /AI (\d+)/.exec(msg)?.[1];
   if (/badCheck|checksum|check digit/i.test(msg)) return ai ? t('GS1 : clé de contrôle incorrecte pour l’AI ({ai})', { ai }) : t('GS1 : clé de contrôle incorrecte');
   if (/tooShort|tooLong|length/i.test(msg) && ai) return t('GS1 : longueur incorrecte pour l’AI ({ai})', { ai });
-  if (/badCharacter|invalid char|bad char/i.test(msg) && ai) return t('GS1 : caractère non autorisé dans l’AI ({ai})', { ai });
+  if (/badCharacter|invalid char|bad char|CSET ?\d+/i.test(msg) && ai) return t('GS1 : caractère non autorisé dans l’AI ({ai})', { ai });
   if (/unknownAI|unrecognised AI|unknown AI/i.test(msg)) return t('GS1 : identifiant d’application (AI) inconnu');
   if (/GS1/.test(msg) && ai) return t('GS1 : valeur invalide pour l’AI ({ai})', { ai });
+  if (/GS1dl/i.test(msg)) return t('Digital Link : URL non conforme (chemin /01/GTIN… attendu)');
   return null;
 }
 

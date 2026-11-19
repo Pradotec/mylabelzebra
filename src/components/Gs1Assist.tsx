@@ -7,8 +7,9 @@
 import { useEffect, useState } from 'react';
 import { Trash2, Wand2 } from 'lucide-react';
 import { useStore } from '../store';
-import type { BarcodeEl, LabelElement } from '../types';
+import type { BarcodeEl, LabelElement, Symbology } from '../types';
 import { gs1Check, priceCheck4 } from '../render/codes';
+import { symbologyPatch } from '../elements';
 import { t } from '../i18n';
 
 const up = (id: string, p: Partial<LabelElement>, key?: string) => useStore.getState().updateEls([id], p, key);
@@ -43,7 +44,7 @@ export const AI_DEFS: AiDef[] = [
 ];
 const defOf = (ai: string) => AI_DEFS.find((d) => d.ai === ai);
 
-interface AiRow {
+export interface AiRow {
   ai: string;
   v: string;
 }
@@ -122,25 +123,97 @@ export function buildGs1(rows: AiRow[]): string {
 const yymmdd = (iso: string) => (iso ? iso.slice(2, 4) + iso.slice(5, 7) + iso.slice(8, 10) : '');
 const isoOf = (v: string) => (/^\d{6}$/.test(v) && v.slice(4) !== '00' ? `20${v.slice(0, 2)}-${v.slice(2, 4)}-${v.slice(4, 6)}` : '');
 
+// ---------------------------------------------------------------------------
+// GS1 Digital Link (URI) : https://domaine/01/{GTIN}[/22/…][/10/…][/21/…]?17=AAMMJJ&…
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_DL_DOMAIN = 'https://id.gs1.org';
+/** Qualificatifs de la clé GTIN placés dans le chemin, dans l'ordre imposé par GS1 Digital Link */
+const DL_PATH_QUALIFIERS = ['22', '10', '21'];
+/** Encodage d'une valeur dans l'URI : tout ce qui n'est pas « non réservé » (RFC 3986) est %-encodé */
+const dlEnc = (v: string) => (hasField(v) ? v : v.replace(/[^A-Za-z0-9\-._~]/g, (c) => Array.from(new TextEncoder().encode(c), (b) => '%' + b.toString(16).toUpperCase().padStart(2, '0')).join('')));
+const dlDec = (v: string) => {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+};
+
+/** Lignes AI → URI Digital Link (mêmes contrôles des AI que le GS1-128 via aiData) */
+export function buildDigitalLink(domain: string, rows: AiRow[]): { url: string; error?: string } {
+  const dom = (domain.trim() || DEFAULT_DL_DOMAIN).replace(/\/+$/, '');
+  if (!/^https?:\/\/[^/\s]+/i.test(dom)) return { url: '', error: t('Domaine : URL https://… attendue') };
+  const filled = rows.filter((r) => r.v.trim());
+  const gtin = filled.find((r) => r.ai === '01');
+  if (!gtin) return { url: '', error: t('GTIN (01) requis pour un Digital Link') };
+  let path = `/01/${dlEnc(aiData(gtin).data)}`;
+  for (const q of DL_PATH_QUALIFIERS) {
+    const r = filled.find((x) => x.ai === q);
+    if (r) path += `/${q}/${dlEnc(aiData(r).data)}`;
+  }
+  const query = filled.filter((r) => r.ai !== '01' && !DL_PATH_QUALIFIERS.includes(r.ai)).map((r) => `${r.ai}=${dlEnc(aiData(r).data)}`);
+  return { url: dom + path + (query.length ? '?' + query.join('&') : '') };
+}
+
+/** URI Digital Link → domaine + lignes AI ; null si l'URI ne contient pas /01/{GTIN} */
+export function parseDigitalLink(url: string): { domain: string; rows: AiRow[] } | null {
+  const v = url.trim();
+  const i = v.search(/\/01\/(\d{8,14}|\{\{[^}]*\}\})(?=[/?#]|$)/);
+  if (i < 0) return null;
+  const domain = v.slice(0, i);
+  const [pathPart, query = ''] = v.slice(i + 1).split('?');
+  const seg = pathPart.split('/');
+  const rows: AiRow[] = [];
+  for (let k = 0; k + 1 < seg.length; k += 2) rows.push({ ai: seg[k], v: hasField(seg[k + 1]) ? seg[k + 1] : dlDec(seg[k + 1]) });
+  for (const kv of query.split('&').filter(Boolean)) {
+    const [k, val = ''] = kv.split('=');
+    if (/^\d{2,4}$/.test(k)) rows.push({ ai: k, v: hasField(val) ? val : dlDec(val) });
+  }
+  return { domain, rows };
+}
+
+/** Cibles de l'assistant GS1 */
+const GS1_TARGETS: { s: Symbology; label: string }[] = [
+  { s: 'gs1-128', label: 'GS1-128' },
+  { s: 'gs1datamatrix', label: 'GS1 DataMatrix' },
+  { s: 'gs1dlqrcode', label: 'QR Digital Link' },
+  { s: 'gs1qrcode', label: 'GS1 QR Code' },
+  { s: 'databarexpanded', label: 'GS1 DataBar Expanded' },
+];
+export const isGs1AssistTarget = (s: Symbology) => GS1_TARGETS.some((x) => x.s === s);
+
+const rowsOf = (el: BarcodeEl): AiRow[] => (el.symbology === 'gs1dlqrcode' ? parseDigitalLink(el.value)?.rows ?? [] : parseGs1(el.value));
+const valueOf = (s: Symbology, rows: AiRow[], domain: string) => (s === 'gs1dlqrcode' ? buildDigitalLink(domain, rows).url : buildGs1(rows));
+
 export function Gs1Assistant({ el }: { el: BarcodeEl }) {
-  const [rows, setRows] = useState<AiRow[]>(() => parseGs1(el.value));
+  const [rows, setRows] = useState<AiRow[]>(() => rowsOf(el));
   const [open, setOpen] = useState(false);
+  const isDl = el.symbology === 'gs1dlqrcode';
+  const domain = el.gs1Domain ?? (isDl ? parseDigitalLink(el.value)?.domain : undefined) ?? DEFAULT_DL_DOMAIN;
   // resynchronise quand la valeur change ailleurs (saisie directe, annuler)
   useEffect(() => {
-    if (buildGs1(rows) !== el.value) setRows(parseGs1(el.value));
+    if (valueOf(el.symbology, rows, domain) !== el.value) setRows(rowsOf(el));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [el.value]);
-  const commit = (next: AiRow[]) => {
+  }, [el.value, el.symbology]);
+  const commit = (next: AiRow[], dom = domain) => {
     setRows(next);
-    up(el.id, { value: buildGs1(next) }, 'gs1' + el.id);
+    const v = valueOf(el.symbology, next, dom);
+    if (v || !isDl) up(el.id, { value: v, ...(isDl ? { gs1Domain: dom } : {}) }, 'gs1' + el.id);
+  };
+  const retarget = (s: Symbology) => {
+    if (s === el.symbology) return;
+    const v = valueOf(s, rows, domain);
+    up(el.id, { ...symbologyPatch(el, s), value: v || el.value, ...(s === 'gs1dlqrcode' ? { gs1Domain: domain } : {}) });
   };
   const setRow = (i: number, p: Partial<AiRow>) => commit(rows.map((r, k) => (k === i ? { ...r, ...p } : r)));
   const used = new Set(rows.map((r) => r.ai));
+  const dl = isDl ? buildDigitalLink(domain, rows) : null;
   return (
     <div className="sec gs1-assist">
       <div className="row" style={{ justifyContent: 'space-between', margin: 0 }}>
         <span className="sec-t" style={{ margin: 0 }}>
-          <Wand2 size={13} style={{ verticalAlign: -2 }} /> {t('Assistant GS1-128')}
+          <Wand2 size={13} style={{ verticalAlign: -2 }} /> {t('Assistant GS1')}
         </span>
         <button className="btn sm flat" onClick={() => setOpen(!open)} aria-expanded={open}>
           {open ? t('Masquer') : t('Ouvrir')}
@@ -148,7 +221,28 @@ export function Gs1Assistant({ el }: { el: BarcodeEl }) {
       </div>
       {open && (
         <>
-          <div className="hint">{t('Chaque ligne est un identifiant d’application (AI). Les AI à longueur fixe sont placés en premier ; le séparateur FNC1 est ajouté automatiquement. Les valeurs peuvent contenir des {{champs}}.')}</div>
+          <label className="f">
+            {t('Symbole à produire')}
+            <select className="inp" value={el.symbology} onChange={(e) => retarget(e.target.value as Symbology)}>
+              {GS1_TARGETS.map((x) => (
+                <option key={x.s} value={x.s}>
+                  {x.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {isDl && (
+            <label className="f">
+              {t('Domaine du Digital Link')}
+              <input className="inp" value={domain} placeholder={DEFAULT_DL_DOMAIN} onChange={(e) => commit(rows, e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
+            </label>
+          )}
+          {dl?.error && <div className="err">{dl.error}</div>}
+          <div className="hint">
+            {isDl
+              ? t('Le GTIN (01) et les qualificatifs (22), (10), (21) forment le chemin de l’URL ; les autres AI (dates, poids…) passent en paramètres. Les valeurs peuvent contenir des {{champs}}.')
+              : t('Chaque ligne est un identifiant d’application (AI). Les AI à longueur fixe sont placés en premier ; le séparateur FNC1 est ajouté automatiquement. Les valeurs peuvent contenir des {{champs}}.')}
+          </div>
           {rows.map((r, i) => {
             const d = defOf(r.ai);
             const res = aiData(r);

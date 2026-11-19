@@ -176,6 +176,19 @@ export function codewordsToGs1(cw: number[]): string | null {
     else if (v < 96) s += String.fromCharCode(v + 32);
     else return null;
   }
+  return gs1StreamToElements(s);
+}
+
+/** Longueur de l'AI qui commence à cette position (d'après ses deux premiers chiffres) */
+export const gs1AiLength = (p2: string) => AI_LEN[p2] ?? 2;
+/** Longueur prédéfinie des données d'un AI (pas de FNC1 après), sinon undefined */
+export const gs1FixedLength = (ai: string): number | undefined => FIXED[ai.slice(0, 2)];
+
+/**
+ * Flux GS1 (FNC1 séparateur = \x1d, FNC1 de tête omis) → « (AI)valeur… » ;
+ * null si la structure n'est pas reconnue.
+ */
+export function gs1StreamToElements(s: string): string | null {
   let out = '';
   let i = 0;
   while (i < s.length) {
@@ -203,4 +216,20 @@ export function codewordsToGs1(cw: number[]): string | null {
     out += `(${ai})${val}`;
   }
   return out || null;
+}
+
+/**
+ * « (AI)valeur… » → flux GS1 : AI et données concaténés dans l'ordre saisi, séparateur
+ * FNC1 (\x1d) après chaque AI de longueur variable qui n'est pas le dernier.
+ * Le FNC1 de tête n'est pas inclus. null si la chaîne n'est pas au format (AI)valeur.
+ */
+export function gs1ElementsToStream(s: string): string | null {
+  const parts = Array.from(s.matchAll(/\((\d{2,4})\)([^()]*)/g));
+  if (!parts.length || parts.map((m) => m[0]).join('') !== s) return null;
+  let out = '';
+  parts.forEach((m, i) => {
+    out += m[1] + m[2];
+    if (i < parts.length - 1 && gs1FixedLength(m[1]) === undefined) out += '\x1d';
+  });
+  return out;
 }

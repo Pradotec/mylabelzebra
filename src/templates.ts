@@ -379,4 +379,48 @@ export const TEMPLATES: Template[] = [
       ], { numbering: { start: 1, step: 1, padding: 0, prefix: '', suffix: '', count: 1 } });
     },
   },
+  {
+    // A6 (105 × 148 mm = 839 × 1183 u). Codes GS1-128 : barres de 270 u ≈ 33,8 mm (≥ 32 mm,
+    // recommandation GS1 pour les étiquettes logistiques) ; hauteur de l'élément = barres + texte (26 × 1,15).
+    id: 'gs1-palette-a6',
+    name: 'Étiquette palette SSCC A6',
+    categories: ['expedition', 'entrepot', 'alimentaire'],
+    brands: ['Logistique', 'Zebra'],
+    build: () => {
+      const gtin = '0376012345000';
+      const g14 = gtin + gs1Check(gtin);
+      const W = 839;
+      const half = 400;
+      return doc('Étiquette palette SSCC A6', 105 / 25.4, 148 / 25.4, [
+        T('EXPÉDITEUR', 20, 12, 370, 16, { bold: true }),
+        T('Atelier Exemple\n12 rue des Lilas\n69003 Lyon — FR', 20, 32, 370, 20, { lineHeight: 1.15, name: 'Expéditeur' }),
+        S('vline', half + 8, 10, 3, 104),
+        T('DESTINATAIRE', half + 26, 12, 390, 16, { bold: true }),
+        T('{{nom}}\n{{adresse}}\n{{cp}} {{ville}}', half + 26, 32, 390, 20, { lineHeight: 1.15, bold: true, name: 'Destinataire' }),
+        S('line', 0, 122, W, 4),
+        T('PALETTE N°', 20, 134, 370, 16, { bold: true }),
+        T('{{numero}}', 20, 154, 370, 30, { bold: true, name: 'Numéro de palette' }),
+        T('NB COLIS', half + 26, 134, 390, 16, { bold: true }),
+        T('40', half + 26, 154, 390, 30, { bold: true, name: 'Nombre de colis' }),
+        S('line', 0, 198, W, 3),
+        T('CONTENU (GTIN)', 20, 208, 370, 16, { bold: true }),
+        T(g14, 20, 228, 370, 28, { name: 'GTIN' }),
+        T('QUANTITÉ', half + 26, 208, 390, 16, { bold: true }),
+        T('40', half + 26, 228, 390, 28, { name: 'Quantité' }),
+        T('LOT', 20, 272, 370, 16, { bold: true }),
+        T('{{?Lot}}', 20, 292, 370, 28, { name: 'Lot' }),
+        T('DLC', half + 26, 272, 390, 16, { bold: true }),
+        T('{{aujourdhui|jours:+21|date:JJ/MM/AAAA}}', half + 26, 292, 390, 28, { name: 'DLC' }),
+        T('POIDS NET', 20, 336, 370, 16, { bold: true }),
+        T('480,0 kg', 20, 356, 370, 28, { name: 'Poids net' }),
+        T('POIDS BRUT', half + 26, 336, 390, 16, { bold: true }),
+        T('505,0 kg', half + 26, 356, 390, 28, { name: 'Poids brut' }),
+        S('line', 0, 404, W, 4),
+        B(`(02)${g14}(17){{aujourdhui|jours:+21|date:AAMMJJ}}(37)40(10){{?Lot}}`, 24, 436, W - 48, 300, 'gs1-128', { fontSize: 26, name: 'GS1-128 contenu' }),
+        S('line', 0, 780, W, 4),
+        T('SSCC', 20, 796, 370, 18, { bold: true }),
+        B('0376012340{{numero}}', 24, 848, W - 48, 300, 'sscc18', { fontSize: 26, name: 'SSCC' }),
+      ], { numbering: { start: 1, step: 1, padding: 7, prefix: '', suffix: '', count: 1 } });
+    },
+  },
 ];

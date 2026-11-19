@@ -1,6 +1,7 @@
-import type { LabelDoc, LabelElement, ShowCondition } from '../types';
+import type { LabelDoc, LabelElement, NumberingConfig, ShowCondition } from '../types';
 import { qrPayload, priceCheck4 } from './codes';
-import { getLastPrompts } from '../prompts';
+import { getLastPrompts, parsePromptOption, mergePromptSpec, type PromptOption, type PromptSpec } from '../prompts';
+import { composeSscc, ssccPreview, type SsccDoc } from '../sscc';
 
 export interface ResolveCtx {
   /** index de l'étiquette dans le lot (0 = première) */
@@ -16,21 +17,28 @@ const MONTHS_LONG = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'jui
 
 const pad = (n: number, l = 2) => String(n).padStart(l, '0');
 
+const DATE_TOKEN = /YYYY|yyyy|AAAA|aaaa|YY|yy|AA|aa|MMMM|mmmm|MMM|mmm|MM|mm|DD|dd|JJ|jj|HH|hh|ss/g;
+
 /**
- * Formate une date. Jetons : YYYY / AAAA, YY / AA, MMMM, MMM, MM, DD / JJ, HH, mm, ss.
+ * Formate une date. Jetons (majuscules ou minuscules) : AAAA / YYYY, AA / YY, MMMM, MMM,
+ * MM, JJ / DD, HH / hh (heures 0-23), mm, ss.
+ * « mm » en minuscules = MOIS, sauf juste après HH / hh (« HH:mm », « hhhmm ») ou juste
+ * avant ss (« mm:ss ») où il désigne les minutes.
  */
 export function formatDate(d: Date, format: string): string {
-  const f = format.replace(/AAAA/g, 'YYYY').replace(/AA/g, 'YY').replace(/JJ/g, 'DD');
-  return f.replace(/YYYY|YY|MMMM|MMM|MM|DD|HH|mm|ss/g, (t) => {
+  return format.replace(DATE_TOKEN, (t, at: number, all: string) => {
     switch (t) {
-      case 'YYYY': return String(d.getFullYear());
-      case 'YY': return pad(d.getFullYear() % 100);
-      case 'MMMM': return MONTHS_LONG[d.getMonth()];
-      case 'MMM': return MONTHS[d.getMonth()];
+      case 'YYYY': case 'yyyy': case 'AAAA': case 'aaaa': return String(d.getFullYear());
+      case 'YY': case 'yy': case 'AA': case 'aa': return pad(d.getFullYear() % 100);
+      case 'MMMM': case 'mmmm': return MONTHS_LONG[d.getMonth()];
+      case 'MMM': case 'mmm': return MONTHS[d.getMonth()];
       case 'MM': return pad(d.getMonth() + 1);
-      case 'DD': return pad(d.getDate());
-      case 'HH': return pad(d.getHours());
-      case 'mm': return pad(d.getMinutes());
+      case 'mm': {
+        const minutes = /(HH|hh)[:h.]?$/.test(all.slice(0, at)) || /^[:.]?ss/.test(all.slice(at + 2));
+        return pad(minutes ? d.getMinutes() : d.getMonth() + 1);
+      }
+      case 'DD': case 'dd': case 'JJ': case 'jj': return pad(d.getDate());
+      case 'HH': case 'hh': return pad(d.getHours());
       case 'ss': return pad(d.getSeconds());
     }
     return t;
@@ -53,12 +61,84 @@ export function dateValue(doc: LabelDoc, extraDays?: number): string {
   return formatDate(dateObj(doc, extraDays), doc.date.format || 'DD/MM/YYYY');
 }
 
+/** Répétition effective du compteur (même numéro sur N étiquettes), ≥ 1 */
+export const serialRepeat = (n: NumberingConfig) => Math.max(1, Math.floor(Number(n.repeat) || 1));
+
+/** Valeur numérique du compteur pour l'étiquette d'index donné (pas, répétition) */
+export function serialNumber(n: NumberingConfig, index: number): number {
+  return (Number(n.start) || 0) + Math.floor(Math.max(0, index) / serialRepeat(n)) * (Number(n.step) || 1);
+}
+
+/** Départ de la série suivante après avoir produit « count » étiquettes */
+export function serialNextStart(n: NumberingConfig, count: number): number {
+  return serialNumber(n, Math.ceil(Math.max(0, count) / serialRepeat(n)) * serialRepeat(n));
+}
+
+/** Nombre → chiffres du compteur (décimal ou base 36 majuscules), sans signe ni zéros */
+export const serialDigits = (v: number, alpha?: boolean) => (alpha ? Math.abs(v).toString(36).toUpperCase() : String(Math.abs(v)));
+
+/** Lit un départ saisi en base 36 (« A0 » → 360) ; NaN si invalide */
+export function parseSerialAlpha(s: string): number {
+  const t = s.trim();
+  if (!/^-?[0-9a-z]+$/i.test(t)) return NaN;
+  return parseInt(t, 36);
+}
+
 export function serialValue(doc: LabelDoc, index: number): string {
   const n = doc.numbering;
-  const v = (Number(n.start) || 0) + index * (Number(n.step) || 1);
-  const neg = v < 0;
-  const s = String(Math.abs(v)).padStart(Math.max(0, Number(n.padding) || 0), '0');
-  return `${n.prefix || ''}${neg ? '-' : ''}${s}${n.suffix || ''}`;
+  const v = serialNumber(n, index);
+  const s = serialDigits(v, n.alpha).padStart(Math.max(0, Number(n.padding) || 0), '0');
+  return `${n.prefix || ''}${v < 0 ? '-' : ''}${s}${n.suffix || ''}`;
+}
+
+// ---------- Position dans le travail ({{#pos}} / {{#total}}) ----------
+
+const jobCache = new WeakMap<object, { total: number; rank: Map<number, number> }>();
+
+/**
+ * Position (1-based) de l'étiquette dans le travail et nombre d'étiquettes différentes
+ * du travail : lignes cochées (sinon 1), sinon la série numérotée. Les copies d'une même
+ * étiquette (×N) sont identiques et ne sont pas comptées.
+ */
+export function jobPosition(doc: LabelDoc, index: number): { pos: number; total: number } {
+  const d = doc.data;
+  if (d && d.rows.length) {
+    let c = jobCache.get(d.checked);
+    if (!c) {
+      const rank = new Map<number, number>();
+      d.checked.forEach((v, i) => v && i < d.rows.length && rank.set(i, rank.size + 1));
+      c = { total: rank.size || 1, rank };
+      jobCache.set(d.checked, c);
+    }
+    return { pos: c.rank.get(index) ?? Math.min(index + 1, c.total), total: c.total };
+  }
+  const total = Math.min(500, Math.max(1, Number(doc.numbering.count) || 1));
+  return { pos: index + 1, total };
+}
+
+// ---------- SSCC ({{#sscc}}) ----------
+
+/**
+ * SSCC 18 chiffres de l'étiquette : dans un travail, celui de la plage réservée (même
+ * SSCC pour les copies d'une étiquette, un SSCC par ligne / numéro) ; dans l'éditeur, le
+ * prochain SSCC prévu (non réservé). Un document de travail sans plage réservée ne
+ * reçoit jamais de numéro (le champ reste affiché tel quel) ; undefined = non configuré.
+ */
+export function ssccValue(doc: LabelDoc, index: number): string | undefined {
+  const a = (doc as SsccDoc).ssccJob;
+  if (a) {
+    const k = a.indices.indexOf(index);
+    return k < 0 ? '' : composeSscc(a.extension, a.prefix, a.start + k);
+  }
+  if (doc.jobDate != null) return undefined;
+  return ssccPreview(jobPosition(doc, index).pos - 1);
+}
+
+const SSCC_RE = /\{\{\s*#sscc\s*(\|[^}]*)?\}\}/i;
+
+/** L'étiquette contient-elle {{#sscc}} (éléments visibles, condition d'affichage comprise) ? */
+export function docUsesSscc(doc: LabelDoc): boolean {
+  return doc.elements.some((e) => !e.hidden && (SSCC_RE.test(textOf(e)) || SSCC_RE.test(e.showIf?.value ?? '') || /^\s*(\{\{)?\s*#sscc\s*(\||\}\}|$)/i.test(e.showIf?.field ?? '')));
 }
 
 const TOKEN = /\{\{\s*([^}]+?)\s*\}\}/g;
@@ -126,47 +206,182 @@ interface Filter {
 /** Filtres reconnus (nom → description courte, pour l'aide) */
 export const FILTERS: { name: string; example: string; help: string }[] = [
   { name: 'defaut', example: '{{lot|defaut:N/A}}', help: 'Valeur de remplacement si le champ est vide' },
+  { name: 'si', example: '{{lot|si:Lot présent}}', help: 'Affiche ce texte si le champ n’est pas vide (sinon rien)' },
+  { name: 'sinon', example: '{{lot|si:Avec lot|sinon:Sans lot}}', help: 'Affiche ce texte si le champ (ou le résultat précédent) est vide' },
   { name: 'maj', example: '{{nom|maj}}', help: 'MAJUSCULES' },
   { name: 'min', example: '{{nom|min}}', help: 'minuscules' },
   { name: 'cap', example: '{{nom|cap}}', help: 'Première lettre en majuscule' },
   { name: 'trim', example: '{{nom|trim}}', help: 'Retire les espaces au début et à la fin' },
   { name: 'tronquer', example: '{{nom|tronquer:20}}', help: 'Garde les N premiers caractères' },
+  { name: 'sous', example: '{{ref|sous:3,4}}', help: 'Sous-chaîne : à partir du caractère N (1 = premier, négatif = depuis la fin), sur L caractères' },
   { name: 'pad', example: '{{code|pad:6}}', help: 'Complète avec des zéros devant (N caractères)' },
   { name: 'nombre', example: '{{poids|nombre:2}}', help: 'Nombre à la française, N décimales' },
+  { name: 'arrondi', example: '{{poids|arrondi:2}}', help: 'Arrondit à N décimales (sans séparateur de milliers)' },
+  { name: 'calc', example: '{{prix|calc:*1,2}}', help: 'Calcul sur la valeur : *1,2  /1000  +5  -3  ou expression avec x, ex. (x-10)/2' },
   { name: 'prix', example: '{{prix|prix}}', help: 'Prix en euros (12,50 €)' },
-  { name: 'date', example: '{{fabrication|date:JJ/MM/AAAA}}', help: 'Lit une date (Excel, ISO, jj/mm/aaaa) et la formate' },
+  { name: 'prixkg', example: '{{prix|prixkg:Poids|prix}}', help: 'Prix au kilo : prix ÷ poids (kg) de la colonne indiquée ; « prixkg:Poids,g » si le poids est en grammes' },
+  { name: 'date', example: '{{fabrication|date:JJ/MM/AAAA}}', help: 'Lit une date (Excel, ISO, jj/mm/aaaa) et la formate. Jetons : JJ, MM, MMM, MMMM, AA, AAAA, HH, mm, ss (minuscules acceptées : jj/mm/aaaa ; « mm » = minutes seulement après HH)' },
   { name: 'jours', example: '{{fabrication|jours:+5|date:JJ/MM/AAAA}}', help: 'Ajoute (ou retire) N jours à une date' },
   { name: 'remplacer', example: '{{ref|remplacer:-:/}}', help: 'Remplace un texte par un autre' },
   { name: 'chiffres', example: '{{poids|nombre:3|chiffres}}', help: 'Ne garde que les chiffres' },
   { name: 'cleprix', example: '{{prix|nombre:2|chiffres|pad:4|cleprix}}', help: 'EAN-13 prix variable : ajoute la clé prix devant 4 chiffres' },
 ];
 const FILTER_NAMES = new Set(FILTERS.map((f) => f.name));
-const ALIASES: Record<string, string> = { défaut: 'defaut', default: 'defaut', upper: 'maj', lower: 'min', majuscules: 'maj', minuscules: 'min', replace: 'remplacer', days: 'jours' };
+const ALIASES: Record<string, string> = {
+  défaut: 'defaut',
+  default: 'defaut',
+  upper: 'maj',
+  lower: 'min',
+  majuscules: 'maj',
+  minuscules: 'min',
+  replace: 'remplacer',
+  days: 'jours',
+  round: 'arrondi',
+  substr: 'sous',
+};
 const normName = (n: string) => {
   const k = n.trim().toLowerCase();
   return ALIASES[k] ?? k;
 };
 
-/** Sépare « clé|filtre:arg|filtre » (le « | » à l'intérieur d'un argument n'est pas géré) */
-function parseToken(raw: string): { key: string; filters: Filter[] } {
+/**
+ * Sépare « clé|filtre:arg|filtre » (le « | » à l'intérieur d'un argument n'est pas géré).
+ * Pour un champ à saisir ({{?Nom|…}}), les options de saisie (liste, obligatoire, gtin,
+ * regex, min:N, max:N) sont mises à part et ne sont pas appliquées comme filtres.
+ */
+function parseToken(raw: string): { key: string; filters: Filter[]; options: PromptOption[] } {
   const parts = raw.split('|');
   const key = parts[0].trim();
-  const filters = parts.slice(1).map((p) => {
+  const isPrompt = promptName(key) != null;
+  const filters: Filter[] = [];
+  const options: PromptOption[] = [];
+  for (const p of parts.slice(1)) {
     const i = p.indexOf(':');
-    return i < 0 ? { name: normName(p), arg: '' } : { name: normName(p.slice(0, i)), arg: p.slice(i + 1) };
-  });
-  return { key, filters };
+    const f = i < 0 ? { name: normName(p), arg: '' } : { name: normName(p.slice(0, i)), arg: p.slice(i + 1) };
+    const o = isPrompt ? parsePromptOption(f.name, f.arg) : null;
+    if (o) options.push(o);
+    else filters.push(f);
+  }
+  return { key, filters, options };
 }
 
 const asStr = (v: Val, doc: LabelDoc) => (v instanceof Date ? formatDate(v, doc.date.format || 'DD/MM/YYYY') : v);
 const frNum = (n: number, dec: number) =>
-  n.toLocaleString('fr-FR', { minimumFractionDigits: dec, maximumFractionDigits: dec }).replace(/ /g, ' ');
+  n.toLocaleString('fr-FR', { minimumFractionDigits: dec, maximumFractionDigits: dec }).replace(/ /g, ' ');
 
-function applyFilter(v: Val, f: Filter, doc: LabelDoc): Val {
+/** Résultat de calcul → texte : virgule décimale, sans milliers ni notation scientifique (10 décimales max) */
+export function numText(n: number, dec?: number): string {
+  const s = n.toLocaleString('en-US', {
+    useGrouping: false,
+    minimumFractionDigits: dec ?? 0,
+    maximumFractionDigits: dec ?? 10,
+  });
+  return (/^-0([.,]0*)?$/.test(s) ? s.slice(1) : s).replace('.', ',');
+}
+
+/** Arrondi « commercial » (au plus loin de zéro) à N décimales (N négatif : dizaines…) */
+export function roundTo(n: number, dec: number): number {
+  const sign = n < 0 ? -1 : 1;
+  return sign * Number(Math.round(Number(Math.abs(n) + 'e' + dec)) + 'e' + -dec);
+}
+
+/**
+ * Calcul sûr (sans eval) : + - * / ( ), nombres à virgule ou à point, « x » (ou « valeur »)
+ * = la valeur du champ. Une expression qui commence par un opérateur s'applique à la valeur
+ * (« *1,2 » = « x*1,2 »). Renvoie NaN si l'expression est invalide ou divise par zéro.
+ */
+export function calcExpr(expr: string, x: number): number {
+  let src = expr.replace(/\s+/g, '').replace(/valeur/gi, 'x').replace(/[×]/g, '*').replace(/[÷]/g, '/');
+  if (/^[*/+-]/.test(src)) src = 'x' + src;
+  const toks = src.match(/\d+(?:[.,]\d+)?|[.,]\d+|[x()*/+-]|./gi) ?? [];
+  let i = 0;
+  const peek = () => toks[i];
+  const fail = () => {
+    throw new Error('calc');
+  };
+  const primary = (): number => {
+    const t = toks[i++];
+    if (t === undefined) return fail();
+    if (t === '(') {
+      const v = sum();
+      if (toks[i++] !== ')') fail();
+      return v;
+    }
+    if (t === '-') return -primary();
+    if (t === '+') return primary();
+    if (t.toLowerCase() === 'x') return x;
+    if (/^[\d.,]/.test(t)) return parseFloat(t.replace(',', '.'));
+    return fail();
+  };
+  const product = (): number => {
+    let v = primary();
+    while (peek() === '*' || peek() === '/') {
+      const op = toks[i++];
+      const r = primary();
+      if (op === '/' && r === 0) fail();
+      v = op === '*' ? v * r : v / r;
+    }
+    return v;
+  };
+  const sum = (): number => {
+    let v = product();
+    while (peek() === '+' || peek() === '-') {
+      const op = toks[i++];
+      const r = product();
+      v = op === '+' ? v + r : v - r;
+    }
+    return v;
+  };
+  try {
+    if (!toks.length || toks.length > 200) return NaN;
+    const v = sum();
+    return i === toks.length && Number.isFinite(v) ? v : NaN;
+  } catch {
+    return NaN;
+  }
+}
+
+function applyFilter(v: Val, f: Filter, ctx: ResolveCtx): Val {
+  const doc = ctx.doc;
   const s = () => asStr(v, doc);
   switch (f.name) {
     case 'defaut':
       return s().trim() === '' ? f.arg : v;
+    case 'si':
+      return s().trim() === '' ? '' : f.arg;
+    case 'sinon':
+      return s().trim() === '' ? f.arg : v;
+    case 'sous': {
+      const [a, l] = f.arg.split(/[,;]/).map((x) => parseInt(x.trim(), 10));
+      if (isNaN(a)) return v;
+      const chars = Array.from(s());
+      const start = a > 0 ? a - 1 : a < 0 ? Math.max(0, chars.length + a) : 0;
+      return chars.slice(start, isNaN(l) ? undefined : start + Math.max(0, l)).join('');
+    }
+    case 'arrondi': {
+      const n = parseNumber(s());
+      const dec = f.arg.trim() === '' ? 0 : parseInt(f.arg, 10);
+      if (isNaN(n) || isNaN(dec)) return v;
+      const d = Math.max(-10, Math.min(10, dec));
+      return numText(roundTo(n, d), Math.max(0, d));
+    }
+    case 'calc': {
+      const x = parseNumber(s());
+      const r = calcExpr(f.arg, x);
+      return isNaN(r) ? v : numText(roundTo(r, 10));
+    }
+    case 'prixkg': {
+      const price = parseNumber(s());
+      const parts = f.arg.split(',');
+      const unit = parts.length > 1 ? parts[parts.length - 1].trim().toLowerCase() : '';
+      const col = stripBraces(unit === 'g' || unit === 'kg' ? parts.slice(0, -1).join(',') : f.arg).trim();
+      if (!col || isNaN(price)) return v;
+      const wv = keyValue(col, ctx, false);
+      let w = wv === undefined ? NaN : parseNumber(asStr(wv, doc));
+      if (unit === 'g') w /= 1000;
+      // poids absent ou nul : rien (un prix au kilo faux serait trompeur)
+      return !(w > 0) ? '' : numText(roundTo(price / w, 2), 2);
+    }
     case 'maj':
       return s().toLocaleUpperCase('fr-FR');
     case 'min':
@@ -263,14 +478,42 @@ export function promptFields(doc: LabelDoc): string[] {
   return out;
 }
 
+/**
+ * Description des champs à saisir (type, choix, contraintes), dans l'ordre d'apparition.
+ * Options : {{?Nom|liste:A;B;C}}, |obligatoire, |gtin, |regex:…, |min:N, |max:N
+ * (les options de toutes les occurrences d'un même champ sont fusionnées).
+ */
+export function promptSpecs(doc: LabelDoc): PromptSpec[] {
+  const out = new Map<string, PromptSpec>();
+  const add = (raw: string) => {
+    const { key, options } = parseToken(raw);
+    const n = promptName(key);
+    if (!n) return;
+    out.set(n, mergePromptSpec(out.get(n) ?? { name: n, type: 'text', required: false }, options));
+  };
+  for (const el of doc.elements) {
+    if (el.hidden) continue;
+    const s = textOf(el);
+    if (s.indexOf('{{') >= 0) for (const m of s.matchAll(TOKEN)) add(m[1]);
+    if (el.showIf?.field) add(stripBraces(el.showIf.field));
+  }
+  return Array.from(out.values());
+}
+
 // ---------- Résolution ----------
 
 const isSerialKey = (lower: string) => lower === 'numero' || lower === 'numéro' || lower === '#' || lower === 'serial';
+/** {{#pos}} position dans le travail, {{#total}} nombre d'étiquettes du travail (colis « 1/N ») */
+const isPosKey = (lower: string) => lower === '#pos' || lower === '#colis';
+const isTotalKey = (lower: string) => lower === '#total' || lower === '#nb';
 
 /** Valeur brute d'une clé ; undefined = clé inconnue sans ligne de données */
 function keyValue(key: string, ctx: ResolveCtx, filtered: boolean): Val | undefined {
   const lower = key.toLowerCase();
   if (isSerialKey(lower)) return serialValue(ctx.doc, ctx.index);
+  if (isPosKey(lower)) return String(jobPosition(ctx.doc, ctx.index).pos);
+  if (isTotalKey(lower)) return String(jobPosition(ctx.doc, ctx.index).total);
+  if (lower === '#sscc') return ssccValue(ctx.doc, ctx.index);
   const dm = /^date\s*([+-]\s*\d+)?$/i.exec(key);
   if (dm) {
     const extra = dm[1] ? parseInt(dm[1].replace(/\s/g, ''), 10) : undefined;
@@ -292,7 +535,7 @@ function evalToken(raw: string, ctx: ResolveCtx): string | undefined {
   const { key, filters } = parseToken(raw);
   let v = keyValue(key, ctx, filters.length > 0);
   if (v === undefined) return undefined;
-  for (const f of filters) v = applyFilter(v, f, ctx.doc);
+  for (const f of filters) v = applyFilter(v, f, ctx);
   return asStr(v, ctx.doc);
 }
 
@@ -364,7 +607,7 @@ export function textOf(el: LabelElement): string {
 }
 
 export function docUsesSerial(doc: LabelDoc): boolean {
-  return doc.elements.some((e) => /\{\{\s*(numero|numéro|#|serial)\s*(\|[^}]*)?\}\}/i.test(textOf(e)));
+  return doc.elements.some((e) => /\{\{\s*(numero|numéro|#|serial|#pos|#colis|#total|#nb)\s*(\|[^}]*)?\}\}/i.test(textOf(e)));
 }
 
 export interface PrintJob {
@@ -383,7 +626,7 @@ export function batchJobs(doc: LabelDoc, currentRow = 0): PrintJob[] {
     const list = idx.length ? idx : [Math.min(currentRow, d.rows.length - 1)];
     return list.map((i) => ({ index: i, copies: Math.max(1, Number(d.copies[i]) || 1) }));
   }
-  if (docUsesSerial(doc)) {
+  if (docUsesSerial(doc) || docUsesSscc(doc)) {
     const n = Math.min(500, Math.max(1, Number(doc.numbering.count) || 1));
     return Array.from({ length: n }, (_, i) => ({ index: i, copies: Math.max(1, doc.copies || 1) }));
   }

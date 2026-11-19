@@ -31,7 +31,15 @@ export type Symbology =
   | 'interleaved2of5'
   | 'sscc18'
   | 'rationalizedCodabar'
-  | 'datamatrix';
+  | 'datamatrix'
+  | 'pdf417'
+  | 'azteccode'
+  | 'gs1datamatrix'
+  | 'gs1qrcode'
+  | 'gs1dlqrcode'
+  | 'databaromni'
+  | 'databarstackedomni'
+  | 'databarexpanded';
 export type QrLevel = 'L' | 'M' | 'Q' | 'H';
 export type CurveMode = 'none' | 'arcTop' | 'arcBottom' | 'circle';
 
@@ -60,7 +68,34 @@ interface Base {
   groups?: string[];
   /** afficher seulement si… (optionnel) */
   showIf?: ShowCondition;
+  /** rôle réglementaire de l'élément (mentions obligatoires, règl. UE 1169/2011) */
+  role?: FoodRole;
+  /**
+   * ancre verticale : l'élément se place sous l'élément « anchorTo » en conservant l'écart
+   * du modèle ; si celui-ci n'est pas imprimé (masqué, condition) ou vide, il remonte à sa place.
+   */
+  anchorTo?: string;
 }
+
+/**
+ * Rôles des mentions d'étiquetage alimentaire (règl. UE 1169/2011 art. 9 et 10,
+ * directive 2011/91/UE pour le lot, règl. CE 853/2004 pour l'estampille).
+ */
+export type FoodRole =
+  | 'denomination'
+  | 'ingredients'
+  | 'allergens'
+  | 'netQuantity'
+  | 'useBy'
+  | 'bestBefore'
+  | 'storage'
+  | 'operator'
+  | 'origin'
+  | 'nutrition'
+  | 'alcohol'
+  | 'instructions'
+  | 'lot'
+  | 'healthMark';
 
 export interface TextEl extends Base {
   type: 'text';
@@ -92,6 +127,12 @@ export interface TextEl extends Base {
   zplAsImage?: boolean;
   /** mettre les allergènes (INCO) en gras */
   boldAllergens?: boolean;
+  /** mention obligatoire (règlement INCO 1169/2011) : contrôle de la hauteur de x imprimée */
+  incoMandatory?: boolean;
+  /** surface de la plus grande face de l'emballage, en cm² (< 80 → seuil 0,9 mm, sinon 1,2 mm) */
+  incoFaceCm2?: number;
+  /** supprimer les lignes qui ne contiennent que des champs vides (adresses) */
+  removeEmptyLines?: boolean;
 }
 
 export interface BarcodeEl extends Base {
@@ -101,6 +142,8 @@ export interface BarcodeEl extends Base {
   showText: boolean;
   fontSize: number;
   color: Color;
+  /** QR GS1 Digital Link : domaine de l'URL (défaut https://id.gs1.org) */
+  gs1Domain?: string;
 }
 
 export type QrType = 'text' | 'wifi' | 'vcard';
@@ -163,7 +206,28 @@ export interface TableEl extends Base {
   rowHeights: number[];
 }
 
-export type LabelElement = TextEl | BarcodeEl | QrEl | ImageEl | ShapeEl | TableEl;
+/**
+ * Marques réglementaires dessinées par l'application :
+ * - health : estampille sanitaire / marque d'identification ovale (règl. CE 853/2004, annexe II section I) ;
+ * - estimated : signe « ℮ » des préemballages (directive 76/211/CEE, annexe I point 3.3).
+ */
+export type MarkKind = 'health' | 'estimated';
+export interface MarkEl extends Base {
+  type: 'mark';
+  kind: MarkKind;
+  /** code pays (ex. « FR ») — estampille */
+  country: string;
+  /** numéro d'agrément (format libre, {{champs}} acceptés) — estampille */
+  approval: string;
+  /** mention finale : « CE » (défaut), « UE » ou autre texte — estampille */
+  suffix: string;
+  color: Color;
+  /** épaisseur du contour de l'ovale (u) — estampille */
+  strokeWidth: number;
+  fontFamily?: string;
+}
+
+export type LabelElement = TextEl | BarcodeEl | QrEl | ImageEl | ShapeEl | TableEl | MarkEl;
 export type ElementType = LabelElement['type'];
 
 export interface DataSet {
@@ -174,15 +238,30 @@ export interface DataSet {
   /** nombre de copies par ligne */
   copies: number[];
   source?: string;
+  /** feuille importée d'un classeur Excel / ODS */
+  sheet?: string;
+  /** toutes les feuilles du classeur importé (choix de la feuille) */
+  sheets?: string[];
+  /** avertissements d'import, affichés dans le panneau Données */
+  warnings?: (
+    | { kind: 'truncated'; kept: number; total: number }
+    | { kind: 'precision'; column: string; count: number; example: string }
+    | { kind: 'encoding'; encoding: string }
+  )[];
 }
 
 export interface NumberingConfig {
   start: number;
+  /** incrément (négatif accepté ; 0 → 1) */
   step: number;
   padding: number;
   prefix: string;
   suffix: string;
   count: number;
+  /** même numéro sur N étiquettes de suite (défaut 1) */
+  repeat?: number;
+  /** numéro en base 36 (0-9 puis A-Z) au lieu du décimal (défaut false) */
+  alpha?: boolean;
 }
 
 export interface DateConfig {
@@ -199,6 +278,16 @@ export interface SheetConfig {
   /** calibrage de l'imprimante de bureau : décalage de toute la planche, en mm (+ = droite / bas) */
   offsetXmm?: number;
   offsetYmm?: number;
+}
+
+/** Rouleau à plusieurs étiquettes de front (2 ou 3 colonnes) */
+export interface RollConfig {
+  /** nombre d'étiquettes de front (1 = désactivé) */
+  columns: number;
+  /** écart horizontal entre deux étiquettes, en mm */
+  gapMm: number;
+  /** marge gauche du support avant la première étiquette, en mm */
+  leftMm: number;
 }
 
 export interface LabelDoc {
@@ -233,6 +322,13 @@ export interface LabelDoc {
   promptValues?: Record<string, string>;
   /** date de référence d'un travail (réimpression à l'identique) */
   jobDate?: number;
+  /**
+   * plage SSCC réservée pour un travail ({{#sscc}}) — n'existe que sur la copie du
+   * document utilisée pour un travail, jamais sur le document édité.
+   */
+  ssccJob?: { prefix: string; extension: number; start: number; indices: number[] };
+  /** plusieurs étiquettes de front sur le même rouleau */
+  roll?: RollConfig;
 }
 
 export interface SavedLabel {

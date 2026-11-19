@@ -1,13 +1,14 @@
 import { useStore } from './store';
-import type { LabelDoc, LabelElement, SavedLabel, Symbology, TextEl } from './types';
+import type { LabelDoc, LabelElement, SavedLabel, Symbology, TextEl, MarkKind, MarkEl } from './types';
 import { BASE_DPI } from './types';
-import { makeBarcode, makeImage, makeQr, makeShape, makeTable, makeText, newDoc } from './elements';
+import { makeBarcode, makeImage, makeQr, makeShape, makeTable, makeText, makeMark, newDoc } from './elements';
 import { fileToDataUrl, loadImage } from './render/images';
-import { kvGet, kvSet } from './storage';
+import { kvGet, kvSet, storageErrorMessage } from './storage';
 import { thumbnail, jsonToDoc } from './export';
 import { uid, deepClone } from './util';
 import { t } from './i18n';
-import { docUsesSerial } from './render/resolve';
+import { docUsesSerial, serialNextStart, serialDigits } from './render/resolve';
+import { elementBounds, elementHeight, hasFixedHeight } from './render/draw';
 import * as zebra from './zebra';
 
 const S = () => useStore.getState();
@@ -32,12 +33,19 @@ export function addTable(rows = 3, cols = 3) {
   const s = S();
   s.addElements([makeTable(s.doc, rows, cols)]);
 }
+/** Estampille sanitaire ovale (« health ») ou signe ℮ (« estimated ») */
+export function addMark(kind: MarkKind, extra?: Partial<MarkEl>) {
+  const s = S();
+  s.addElements([makeMark(s.doc, kind, extra)]);
+}
+export const addHealthMark = () => addMark('health');
+export const addEstimatedSign = () => addMark('estimated');
 
-export async function addImageSrc(src: string) {
+export async function addImageSrc(src: string, extra: Partial<LabelElement> = {}) {
   try {
     const img = await loadImage(src);
     const s = S();
-    s.addElements([makeImage(s.doc, src, img.naturalWidth || 200, img.naturalHeight || 200)]);
+    s.addElements([{ ...makeImage(s.doc, src, img.naturalWidth || 200, img.naturalHeight || 200), ...extra } as LabelElement]);
   } catch {
     S().toast(t('Image illisible'), 'error');
   }
@@ -100,35 +108,52 @@ export async function saveCurrent(): Promise<boolean> {
   const entry: SavedLabel = { doc, thumb: thumbnail(doc), savedAt: Date.now() };
   if (i >= 0) list[i] = entry;
   else list.unshift(entry);
-  await kvSet('saved', list);
+  try {
+    await kvSet('saved', list);
+  } catch (e) {
+    s.toast(storageErrorMessage(e), 'error');
+    return false;
+  }
   useStore.setState({ dirty: false, savedVersion: s.savedVersion + 1 });
   s.toast(t('Étiquette enregistrée'), 'ok');
   return true;
 }
 
-export async function deleteSaved(id: string) {
-  const list = (await listSaved()).filter((x) => x.doc.id !== id);
-  await kvSet('saved', list);
+/** Écrit la liste « Mes étiquettes » ; en cas d'échec (quota…), message et false */
+async function writeSaved(list: SavedLabel[]): Promise<boolean> {
+  try {
+    await kvSet('saved', list);
+    return true;
+  } catch (e) {
+    S().toast(storageErrorMessage(e), 'error');
+    return false;
+  }
 }
-export async function renameSaved(id: string, name: string) {
+
+export async function deleteSaved(id: string): Promise<boolean> {
+  const list = (await listSaved()).filter((x) => x.doc.id !== id);
+  return writeSaved(list);
+}
+export async function renameSaved(id: string, name: string): Promise<boolean> {
   const list = await listSaved();
   const e = list.find((x) => x.doc.id === id);
   if (e) e.doc = { ...e.doc, name };
-  await kvSet('saved', list);
+  if (!(await writeSaved(list))) return false;
   const s = S();
   if (s.doc.id === id) useStore.setState({ doc: { ...s.doc, name } });
+  return true;
 }
-export async function duplicateSaved(id: string) {
+export async function duplicateSaved(id: string): Promise<boolean> {
   const list = await listSaved();
   if (list.length >= MAX_SAVED) {
     S().toast(t('Limite de {n} étiquettes atteinte : supprimez-en une dans « Mes étiquettes ».', { n: MAX_SAVED }), 'error');
-    return;
+    return false;
   }
   const e = list.find((x) => x.doc.id === id);
-  if (!e) return;
+  if (!e) return false;
   const copy: SavedLabel = { doc: { ...deepClone(e.doc), id: uid(), name: e.doc.name + ' ' + t('(copie)') }, thumb: e.thumb, savedAt: Date.now() };
   list.unshift(copy);
-  await kvSet('saved', list);
+  return writeSaved(list);
 }
 
 export function confirmDiscard(): boolean {
@@ -200,6 +225,9 @@ function scaleElement(e: LabelElement, s: number, dx: number, dy: number): Label
       n.strokeWidth *= s;
       if (n.radius) n.radius *= s;
       break;
+    case 'mark':
+      n.strokeWidth *= s;
+      break;
   }
   return n;
 }
@@ -263,10 +291,12 @@ export async function sendToZebra(zpl: string, advanceSerial = true): Promise<bo
     const doc = s.doc;
     if (advanceSerial && docUsesSerial(doc) && !(doc.data && doc.data.rows.length)) {
       const n = Math.min(500, Math.max(1, doc.numbering.count));
+      // même calcul que l'aperçu : pas, répétition (même numéro sur N étiquettes), base 36
+      const next = serialNextStart(doc.numbering, n);
       s.setDoc((d) => {
-        d.numbering = { ...d.numbering, start: d.numbering.start + n * d.numbering.step };
+        d.numbering = { ...d.numbering, start: next };
       });
-      s.toast(t('Numérotation : prochain départ à {n}', { n: doc.numbering.start + n * doc.numbering.step }));
+      s.toast(t('Numérotation : prochain départ à {n}', { n: (next < 0 ? '-' : '') + serialDigits(next, doc.numbering.alpha) }));
     }
     return true;
   } catch (e) {
@@ -276,6 +306,80 @@ export async function sendToZebra(zpl: string, advanceSerial = true): Promise<bo
     } else s.toast(t('Erreur d’impression : {m}', { m: (e as Error).message }), 'error');
     return false;
   }
+}
+
+// ---------- Répartir / uniformiser ----------
+type Box = { x: number; y: number; w: number; h: number };
+
+/**
+ * Répartition à espacement égal (≥ 3 éléments) : les deux éléments extrêmes restent en
+ * place, les autres sont déplacés pour que l'écart entre boîtes englobantes soit constant.
+ * Les éléments verrouillés ne bougent pas mais comptent dans la répartition.
+ * Renvoie les nouvelles positions x (axe 'h') ou y (axe 'v') par id.
+ */
+export function distributePatches(els: LabelElement[], axis: 'h' | 'v', boxOf: (el: LabelElement) => Box): Map<string, Partial<LabelElement>> {
+  const out = new Map<string, Partial<LabelElement>>();
+  if (els.length < 3) return out;
+  const items = els.map((e) => ({ e, b: boxOf(e) }));
+  const pos = (b: Box) => (axis === 'h' ? b.x : b.y);
+  const size = (b: Box) => (axis === 'h' ? b.w : b.h);
+  items.sort((a, b) => pos(a.b) + size(a.b) / 2 - (pos(b.b) + size(b.b) / 2));
+  const first = items[0].b;
+  const last = items[items.length - 1].b;
+  const span = pos(last) + size(last) - pos(first);
+  const total = items.reduce((a, it) => a + size(it.b), 0);
+  const gap = (span - total) / (items.length - 1);
+  let cur = pos(first) + size(first) + gap;
+  for (let i = 1; i < items.length - 1; i++) {
+    const { e, b } = items[i];
+    const d = cur - pos(b);
+    if (!e.locked && Math.abs(d) > 1e-9) out.set(e.id, axis === 'h' ? { x: e.x + d } : { y: e.y + d });
+    cur += size(b) + gap;
+  }
+  return out;
+}
+
+/**
+ * Même largeur / même hauteur (≥ 2 éléments) que l'élément de référence (le premier
+ * sélectionné). Les textes à hauteur automatique gardent leur hauteur ; verrouillés ignorés.
+ */
+export function sameSizePatches(els: LabelElement[], dim: 'w' | 'h', ref: LabelElement): Map<string, Partial<LabelElement>> {
+  const out = new Map<string, Partial<LabelElement>>();
+  if (els.length < 2) return out;
+  for (const e of els) {
+    if (e.id === ref.id || e.locked) continue;
+    if (dim === 'h' && e.type === 'text' && !hasFixedHeight(e)) continue;
+    if (e[dim] !== ref[dim]) out.set(e.id, { [dim]: ref[dim] } as Partial<LabelElement>);
+  }
+  return out;
+}
+
+const selCtx = () => {
+  const s = S();
+  return { doc: s.doc, index: s.previewRow, row: s.doc.data?.rows[s.previewRow], resolve: true };
+};
+/** éléments sélectionnés, dans l'ordre de sélection */
+function selectedEls() {
+  const s = S();
+  return s.selected.map((id) => s.doc.elements.find((e) => e.id === id)).filter((e): e is LabelElement => !!e && !e.hidden);
+}
+function applyPatches(p: Map<string, Partial<LabelElement>>) {
+  if (!p.size) return;
+  // une seule entrée d'historique (annulable en une fois)
+  S().updateEls(Array.from(p.keys()), (e) => p.get(e.id) ?? {});
+}
+
+/** Répartir horizontalement / verticalement les éléments sélectionnés */
+export function distributeSelected(axis: 'h' | 'v') {
+  const ctx = selCtx();
+  applyPatches(distributePatches(selectedEls(), axis, (e) => elementBounds(e, elementHeight(e, ctx))));
+}
+
+/** Même largeur / hauteur que le premier élément sélectionné */
+export function sameSizeSelected(dim: 'w' | 'h') {
+  const els = selectedEls();
+  if (els.length < 2) return;
+  applyPatches(sameSizePatches(els, dim, els[0]));
 }
 
 export function labelDots(doc: LabelDoc) {

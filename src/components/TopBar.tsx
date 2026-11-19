@@ -1,4 +1,4 @@
-import { Undo2, Redo2, HelpCircle, Plus, FolderOpen, Save, FileText, FileDown, FileUp, Image as ImageIcon, FileType, Copy, Download, ScanLine, ClipboardCopy, ClipboardPaste, Languages, Barcode, QrCode, Grid3x3, Printer, Check, History } from 'lucide-react';
+import { Undo2, Redo2, HelpCircle, Plus, FolderOpen, Save, FileText, FileDown, FileUp, Image as ImageIcon, FileType, Copy, Download, ScanLine, ClipboardCopy, ClipboardPaste, Languages, Barcode, QrCode, Grid3x3, Printer, Check, History, Truck, Apple } from 'lucide-react';
 import { useStore } from '../store';
 import { Dropdown } from './ui';
 import { t, getLang, setLang, LANGS } from '../i18n';
@@ -6,6 +6,8 @@ import { newLabel, saveCurrent, importJsonText } from '../actions';
 import { exportJson, docToJson } from '../export';
 import { startJob } from '../jobs';
 import { copyText, pickFile } from '../util';
+import { openCarrierDialog } from './CarrierDialog';
+import { openNutritionDialog } from './NutritionDialog';
 
 export function Logo({ size = 30 }: { size?: number }) {
   return (
@@ -164,6 +166,12 @@ export function TopBar() {
               </button>
               <button className="mi" onClick={go(() => st.set('modal', 'tool-qr'))}>
                 <QrCode size={16} /> {t('Générateur de QR code')}
+              </button>
+              <button className="mi" onClick={go(openCarrierDialog)}>
+                <Truck size={16} /> {t('Étiquettes transporteur…')}
+              </button>
+              <button className="mi" onClick={go(openNutritionDialog)}>
+                <Apple size={16} /> {t('Valeurs nutritionnelles…')}
               </button>
               <hr />
               <div className="mt">

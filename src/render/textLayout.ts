@@ -56,6 +56,42 @@ export function measure(text: string, font: string) {
   return c.measureText(text).width;
 }
 
+// ---------------------------------------------------------------------------
+// Hauteur de x (contrôle INCO)
+// ---------------------------------------------------------------------------
+
+/**
+ * Rapport hauteur de x / corps des polices proposées (métrique OS/2 sxHeight ÷ unitsPerEm
+ * des polices Windows courantes, arrondie). La mesure via canvas (actualBoundingBoxAscent
+ * de « x ») dépend du navigateur et des polices réellement chargées : on préfère cette
+ * table stable. Police inconnue → approximation 0,52 (x-height ≈ 0,52 × taille de police).
+ */
+const X_HEIGHT: Record<string, number> = {
+  arial: 0.519,
+  helvetica: 0.523,
+  'arial narrow': 0.519,
+  verdana: 0.545,
+  tahoma: 0.545,
+  'trebuchet ms': 0.524,
+  'segoe ui': 0.5,
+  georgia: 0.481,
+  'times new roman': 0.448,
+  'courier new': 0.423,
+  consolas: 0.491,
+  impact: 0.616,
+};
+export const X_HEIGHT_DEFAULT = 0.52;
+export function xHeightRatio(fontFamily: string): number {
+  const f = fontFamily.split(',')[0].replace(/["']/g, '').trim().toLowerCase();
+  return X_HEIGHT[f] ?? X_HEIGHT_DEFAULT;
+}
+/** 1 u = 1/203 pouce */
+const MM_PER_U = 25.4 / 203;
+/** Hauteur de x imprimée (mm) pour une taille de police effective (u) */
+export function xHeightMm(el: Pick<TextEl, 'fontFamily'>, fontSizeU: number): number {
+  return xHeightRatio(el.fontFamily) * fontSizeU * MM_PER_U;
+}
+
 /** Mode effectif (compatibilité avec les anciens documents) */
 export function fitMode(el: TextEl): TextFit {
   if (el.fit) return el.fit;

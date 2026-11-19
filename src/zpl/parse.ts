@@ -1,13 +1,15 @@
 /**
  * Interpréteur ZPL local (sous-ensemble courant) pour la visionneuse :
  * ^XA ^XZ ^FO ^FT ^FS ^FD ^FH ^FB ^FR ^LR ^A ^CF ^LH ^PW ^LL ^BY ^BC ^BE ^B8 ^BU ^B9 ^B3 ^BA ^B2 ^BK
- * ^BQ ^BX ^GB ^GE ^GC ^GF(A, Z64) ^FX ^CI ^PQ (ignoré).
+ * ^BQ ^BX (GS1 : FNC1 par caractère d'échappement) ^BO ^B7 ^GB ^GE ^GC ^GF(A, Z64) ^FX ^CI ^PQ (ignoré).
+ * + vérificateur lintZpl (structure, champs hors étiquette, données de codes, ^GFA).
  */
 import type { LabelElement, Symbology, QrLevel } from '../types';
-import { encodeBarcode, encodeQr, encodeCode128Codewords } from '../render/codes';
-import { zplToCodewords, codewordsToGs1, codewordsText } from './code128';
+import { encodeBarcode, encodeQr, encodeCode128Codewords, normalizeBarcode, is2D, PDF417_ROW_MODULES } from '../render/codes';
+import { zplToCodewords, codewordsToGs1, codewordsText, gs1StreamToElements } from './code128';
 import { decodeGfaHex, decodeZ64, bitmapToCanvas, type Bitmap } from './gfa';
 import { uid } from '../util';
+import { t } from '../i18n';
 
 /** Orientation ZPL : Normal, Rotation 90° horaire, Inversé 180°, Bas (270°) */
 export type Orient = 'N' | 'R' | 'I' | 'B';
@@ -92,7 +94,7 @@ export async function parseZpl(code: string): Promise<ZLabel[]> {
   let fb: { w: number; lines: number; spacing: number; just: string } | undefined;
   let fr = false;
   let fh: string | null = null;
-  let bc: { sym: Symbology; h: number; hr: boolean; o: Orient; mode?: string; mag?: number; level?: QrLevel; isQr?: boolean } | null = null;
+  let bc: { sym: Symbology; h: number; hr: boolean; o: Orient; mode?: string; mag?: number; level?: QrLevel; isQr?: boolean; esc?: string } | null = null;
   let data: string | null = null;
 
   const resetField = () => {
@@ -229,7 +231,15 @@ export async function parseZpl(code: string): Promise<ZLabel[]> {
         bc = { sym: SYM[name], o: ORIENT(P[0], fw), h: num(2, by.h), hr: (P[3] || 'Y').trim().toUpperCase() !== 'N' };
         break;
       case 'BX':
-        bc = { sym: 'datamatrix', o: ORIENT(P[0], fw), h: 0, hr: false, mag: num(1, 4) };
+        // g (7e paramètre) : caractère d'échappement de la qualité 200 (« g1 » = FNC1)
+        bc = { sym: 'datamatrix', o: ORIENT(P[0], fw), h: 0, hr: false, mag: num(1, 4), esc: num(2, 0) === 200 ? (P[6] ?? '').trim()[0] || '_' : undefined };
+        break;
+      case 'BO':
+        bc = { sym: 'azteccode', o: ORIENT(P[0], fw), h: 0, hr: false, mag: num(1, 1) };
+        break;
+      case 'B7':
+        // h = hauteur d'une rangée en modules (× largeur de module ^BY)
+        bc = { sym: 'pdf417', o: ORIENT(P[0], fw), h: num(1, 3), hr: false, mag: by.m };
         break;
       case 'BQ':
         // ^BQ n'accepte que l'orientation normale
@@ -293,7 +303,20 @@ export async function parseZpl(code: string): Promise<ZLabel[]> {
               const payload = comma >= 0 && comma <= 3 ? text.slice(comma + 1) : text;
               L().ops.push({ k: 'qr', x: fx, y: fy, o: 'N', ft, mag: bc.mag || 2, data: payload, level, reverse: fr || lr });
             } else if (bc.sym === 'datamatrix') {
-              L().ops.push({ k: 'barcode', x: fx, y: fy, o: bc.o, ft, sym: 'datamatrix', data: text, module: bc.mag || 4, height: 0, hr: false, reverse: fr || lr });
+              // FNC1 en tête (séquence d'échappement « g1 ») : GS1 DataMatrix
+              let sym: Symbology = 'datamatrix';
+              let d = text;
+              const fnc1 = bc.esc ? bc.esc + '1' : '';
+              if (fnc1 && d.startsWith(fnc1)) {
+                const gs1 = gs1StreamToElements(d.slice(fnc1.length).split(fnc1).join('\x1d'));
+                if (gs1 && encodeBarcode(gs1, 'gs1datamatrix').error === undefined) {
+                  sym = 'gs1datamatrix';
+                  d = gs1;
+                }
+              }
+              L().ops.push({ k: 'barcode', x: fx, y: fy, o: bc.o, ft, sym, data: d, module: bc.mag || 4, height: 0, hr: false, reverse: fr || lr });
+            } else if (bc.sym === 'azteccode' || bc.sym === 'pdf417') {
+              L().ops.push({ k: 'barcode', x: fx, y: fy, o: bc.o, ft, sym: bc.sym, data: text, module: bc.mag || 2, height: bc.h, hr: false, reverse: fr || lr });
             } else {
               let d = text;
               let sym = bc.sym;
@@ -393,7 +416,10 @@ function fieldBox(c: CanvasRenderingContext2D, op: Extract<ZOp, Placed>): { lw: 
     case 'barcode': {
       const enc = op.raw ? encodeCode128Codewords(op.raw, op.data) : encodeBarcode(op.data, op.sym);
       if (enc.error !== undefined) return { lw: 300, lh: op.height || 40, base: op.height || 40 };
-      if (enc.kind === 'matrix') return { lw: enc.cols * op.module, lh: enc.rows * op.module, base: enc.rows * op.module };
+      if (enc.kind === 'matrix') {
+        const my = matrixRowModule(op);
+        return { lw: enc.cols * op.module, lh: enc.rows * my, base: enc.rows * my };
+      }
       const hr = op.hr ? hrSize(op.module) * 1.2 : 0;
       return { lw: enc.modules * op.module, lh: op.height + hr, base: op.height };
     }
@@ -406,6 +432,13 @@ function fieldBox(c: CanvasRenderingContext2D, op: Extract<ZOp, Placed>): { lw: 
 }
 
 const hrSize = (module: number) => Math.max(12, Math.min(40, module * 5));
+/**
+ * Hauteur (points) d'une rangée de pixels du symbole 2D. PDF417 : bwip-js produit des
+ * rangées de 3 modules ; ^B7 h fixe la hauteur d'une rangée à h × module.
+ */
+function matrixRowModule(op: { sym: Symbology; module: number; height: number }) {
+  return op.sym === 'pdf417' && op.height > 0 ? (op.module * op.height) / PDF417_ROW_MODULES : op.module;
+}
 const ANGLE: Record<Orient, number> = { N: 0, R: 90, I: 180, B: 270 };
 
 /**
@@ -526,7 +559,8 @@ export function renderZplLabel(label: ZLabel, W: number, H: number): HTMLCanvasE
           break;
         }
         if (enc.kind === 'matrix') {
-          for (let r = 0; r < enc.rows; r++) for (let k = 0; k < enc.cols; k++) if (enc.get(r, k)) c.fillRect(k * op.module, r * op.module, op.module, op.module);
+          const my = matrixRowModule(op);
+          for (let r = 0; r < enc.rows; r++) for (let k = 0; k < enc.cols; k++) if (enc.get(r, k)) c.fillRect(k * op.module, r * my, op.module, my);
           break;
         }
         let x = 0;
@@ -626,7 +660,7 @@ export function zplLabelToElements(label: ZLabel, ds: number): LabelElement[] {
         break;
       }
       case 'barcode': {
-        const isM = op.sym === 'datamatrix';
+        const isM = is2D(op.sym);
         els.push({
           ...base,
           type: 'barcode',
@@ -652,4 +686,236 @@ export function zplLabelToElements(label: ZLabel, ds: number): LabelElement[] {
     }
   }
   return els;
+}
+
+// ---------------------------------------------------------------------------
+// Vérificateur ZPL (lint)
+// ---------------------------------------------------------------------------
+
+export interface LintIssue {
+  /** numéro de ligne (1…) */
+  line: number;
+  level: 'error' | 'warning';
+  msg: string;
+}
+
+/** Commandes ZPL II connues (^ et ~), d'après le ZPL II Programming Guide */
+const KNOWN_CARET = new Set(
+  (
+    'A@ B0 B1 B2 B3 B4 B5 B7 B8 B9 BA BB BC BD BE BF BI BJ BK BL BM BO BP BQ BR BS BT BU BX BY BZ CC CD CF CI CM CN CO CP CT CV CW DF DN DU ' +
+    'FA FB FC FD FE FH FL FM FN FO FP FR FS FT FV FW FX GB GC GD GE GF GS HF HG HH HT HV HW HY HZ ID IL IM IS JB JC JD JE JF JH JI JJ JL JM JN JO JP JQ JR JS JT JU JW JX JZ ' +
+    'KC KD KL KN KP KV LF LH LL LR LS LT MA MC MD MF MI ML MM MN MP MT MU MW NB NC ND NI NN NP NS NT PA PF PH PM PN PO PP PQ PR PS PW RA RB RE RF RI RL RM RN RQ RR RS RT RU RW ' +
+    'SC SE SF SI SL SN SO SP SQ SR SS ST SX SZ TA TB TO WA WD WE WF WI WL WP WR WS WT WV XA XB XF XG XS XZ ZZ'
+  ).split(' '),
+);
+const KNOWN_TILDE = new Set('CC CD CT DB DE DG DN DS DT DU DY EG HB HD HI HM HQ HS HU JA JB JC JD JE JF JG JI JL JN JO JP JQ JR JS JX KB NC NR NT PH PL PP PR PS RO SD TA WC WQ WR'.split(' '));
+
+/** Champs et éléments graphiques : doivent se trouver entre ^XA et ^XZ */
+const FORMAT_CMDS = /^(F[ODTVBRH]|G[BCEFD]|B[0-9A-Z])$/;
+
+/** Nombre de rangées réellement fournies par des données ^GFA (hex ASCII compressé ou non) */
+export function gfaRowsProvided(data: string, bpr: number): number {
+  const rowLen = bpr * 2;
+  let rows = 0;
+  let cur = 0;
+  let count = 0;
+  for (const ch of data) {
+    const code = ch.charCodeAt(0);
+    if (ch === '\n' || ch === '\r' || ch === ' ') continue;
+    if (code >= 0x47 && code <= 0x59) count += code - 0x46;
+    else if (code >= 0x67 && code <= 0x7a) count += (code - 0x66) * 20;
+    else if (ch === ',' || ch === '!') {
+      rows++;
+      cur = 0;
+      count = 0;
+    } else if (ch === ':') {
+      if (cur) rows++;
+      rows++;
+      cur = 0;
+      count = 0;
+    } else if (/[0-9A-Fa-f]/.test(ch)) {
+      cur += Math.max(1, count);
+      count = 0;
+      while (cur >= rowLen) {
+        rows++;
+        cur -= rowLen;
+      }
+    }
+  }
+  return rows + (cur ? 1 : 0);
+}
+
+/** Symbologie à contrôler pour une commande code-barres ZPL */
+const LINT_SYM: Record<string, Symbology> = { BE: 'ean13', B8: 'ean8', BU: 'upca', B9: 'upce', B3: 'code39', BA: 'code93', B2: 'interleaved2of5', BK: 'rationalizedCodabar' };
+
+/**
+ * Vérifie un programme ZPL sans l'imprimer : ^XA/^XZ appariés, ^FD terminés par ^FS,
+ * commandes inconnues, champs hors de l'étiquette (^PW/^LL), données de codes-barres
+ * invalides (mêmes règles que l'éditeur : normalizeBarcode) et ^GFA de taille incohérente.
+ * Fonction pure : renvoie la liste des problèmes avec leur numéro de ligne.
+ */
+export function lintZpl(code: string): LintIssue[] {
+  const issues: LintIssue[] = [];
+  const lineStarts = [0];
+  for (let i = 0; i < code.length; i++) if (code[i] === '\n') lineStarts.push(i + 1);
+  const lineOf = (pos: number) => {
+    let lo = 0,
+      hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (lineStarts[mid] <= pos) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+  const add = (pos: number, level: LintIssue['level'], msg: string) => issues.push({ line: lineOf(pos), level, msg });
+
+  let open = -1; // position du ^XA ouvert
+  let pw = 0,
+    ll = 0,
+    lhX = 0,
+    lhY = 0;
+  let fx = 0,
+    fy = 0;
+  let fh: string | null = null;
+  let bc: { name: string; pos: number } | null = null;
+  let data: { text: string; pos: number } | null = null;
+  const unknown = new Map<string, number>();
+  const resetField = () => {
+    fh = null;
+    bc = null;
+    data = null;
+  };
+  const upper = code.toUpperCase();
+
+  const idx: number[] = [];
+  const re = /[\^~]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(code))) idx.push(m.index);
+  for (let n = 0; n < idx.length; n++) {
+    const start = idx[n];
+    const end = n + 1 < idx.length ? idx[n + 1] : code.length;
+    const name = upper.substr(start + 1, 2);
+    if (code[start] === '~') {
+      if (!KNOWN_TILDE.has(name)) unknown.set('~' + name, unknown.get('~' + name) ?? start);
+      continue;
+    }
+    if (name === 'FX') continue;
+    if ((FORMAT_CMDS.test(name) || (name[0] === 'A' && name !== 'A@')) && open < 0) add(start, 'error', t('^{c} hors d’un bloc ^XA…^XZ', { c: name }));
+    if (name === 'FD' || name === 'FV') {
+      // les données s'arrêtent au premier ^ : s'il ne s'agit pas de ^FS, le champ n'est pas terminé
+      const nextCaret = code.indexOf('^', start + 3);
+      if (nextCaret < 0 || upper.substr(nextCaret + 1, 2) !== 'FS') {
+        const stop = nextCaret < 0 ? code.length : nextCaret;
+        add(start, 'error', nextCaret < 0 ? t('^FD sans ^FS') : t('^FD sans ^FS avant ^{c}', { c: upper.substr(stop + 1, 2) }));
+        data = { text: code.slice(start + 3, stop), pos: start };
+        continue;
+      }
+      data = { text: code.slice(start + 3, nextCaret), pos: start };
+      while (n + 1 < idx.length && idx[n + 1] < nextCaret) n++;
+      continue;
+    }
+    if (name[0] === 'A' && name !== 'A@') continue;
+    const P = code.slice(start + 3, end).split(',');
+    const num = (i: number, d: number) => {
+      const v = parseFloat(P[i]);
+      return Number.isFinite(v) ? v : d;
+    };
+    switch (name) {
+      case 'XA':
+        if (open >= 0) add(open, 'error', t('^XA sans ^XZ correspondant'));
+        open = start;
+        resetField();
+        break;
+      case 'XZ':
+        if (open < 0) add(start, 'error', t('^XZ sans ^XA'));
+        open = -1;
+        break;
+      case 'PW':
+        pw = num(0, 0);
+        break;
+      case 'LL':
+        ll = num(0, 0);
+        break;
+      case 'LH':
+        lhX = num(0, 0);
+        lhY = num(1, 0);
+        break;
+      case 'FO':
+      case 'FT':
+        fx = num(0, 0) + lhX;
+        fy = num(1, 0) + lhY;
+        if ((pw && fx >= pw) || (ll && fy >= ll)) add(start, 'warning', t('Champ hors de l’étiquette ({x},{y}) : ^PW{w} / ^LL{h}', { x: fx, y: fy, w: pw || '?', h: ll || '?' }));
+        break;
+      case 'FH':
+        fh = (P[0] || '_').trim()[0] || '_';
+        break;
+      case 'GB': {
+        const th = num(2, 1);
+        const w = Math.max(num(0, th), th);
+        const h = Math.max(num(1, th), th);
+        if ((pw && fx + w > pw + 1) || (ll && fy + h > ll + 1)) add(start, 'warning', t('^GB dépasse de l’étiquette ({w}×{h} en {x},{y})', { w, h, x: fx, y: fy }));
+        break;
+      }
+      case 'GF': {
+        const fmt = (P[0] || 'A').trim().toUpperCase();
+        const b = num(1, NaN);
+        const c = num(2, NaN);
+        const d = num(3, NaN);
+        const raw = P.slice(4).join(',');
+        if (!(d > 0) || !(c > 0)) {
+          add(start, 'error', t('^GF : taille ou octets par ligne manquants'));
+          break;
+        }
+        if (c % d !== 0) add(start, 'error', t('^GF : {c} octets ne font pas un nombre entier de lignes de {d} octets', { c, d }));
+        if (fmt === 'A' && Number.isFinite(b) && b !== c) add(start, 'warning', t('^GFA : nombre d’octets {b} ≠ taille du graphique {c}', { b, c }));
+        if (fmt === 'A' && !/^:?(Z64|B64):/.test(raw.trim())) {
+          const rows = gfaRowsProvided(raw, d);
+          const want = Math.floor(c / d);
+          if (rows !== want) add(start, 'error', t('^GFA : données pour {n} ligne(s), {m} annoncée(s)', { n: rows, m: want }));
+        }
+        if ((pw && fx + d * 8 > pw + 7) || (ll && fy + Math.floor(c / d) > ll)) add(start, 'warning', t('^GF dépasse de l’étiquette'));
+        break;
+      }
+      case 'FS': {
+        const cur = bc as { name: string; pos: number } | null;
+        const dd = data as { text: string; pos: number } | null;
+        if (cur && dd) {
+          const text = fh ? decodeFH(dd.text, fh) : dd.text;
+          const err = lintBarcode(cur.name, text);
+          if (err) add(dd.pos, 'error', t('Données invalides pour ^{c} : {e}', { c: cur.name, e: err }));
+        } else if (cur && !dd) add(cur.pos, 'error', t('^{c} sans données ^FD', { c: cur.name }));
+        resetField();
+        break;
+      }
+      default:
+        if (/^B[0-9A-Z]$/.test(name) && name !== 'BY') bc = { name, pos: start };
+        else if (!KNOWN_CARET.has(name)) {
+          const k = '^' + name.trim();
+          if (!unknown.has(k)) unknown.set(k, start);
+        }
+    }
+  }
+  if (open >= 0) add(open, 'error', t('^XA sans ^XZ final'));
+  for (const [c, pos] of unknown) add(pos, 'warning', t('Commande inconnue : {c}', { c }));
+  return issues.sort((a, b) => a.line - b.line);
+}
+
+function lintBarcode(name: string, text: string): string | null {
+  if (!text) return t('valeur vide');
+  const sym = LINT_SYM[name];
+  if (sym) {
+    const v = name === 'B3' ? text.replace(/^\*|\*$/g, '') : text;
+    const n = normalizeBarcode(v, sym);
+    return 'error' in n ? n.error : null;
+  }
+  switch (name) {
+    case 'BC':
+      if (/^>[9:;]/.test(text) && !zplToCodewords(text)) return t('codes d’invocation Code 128 invalides');
+      return null;
+    case 'BQ':
+      return /^[HQML]?[AM]?,/i.test(text) ? null : t('format attendu « MA,données »');
+    default:
+      return null;
+  }
 }

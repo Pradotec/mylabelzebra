@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Type, Barcode, QrCode, Image as ImageIcon, Shapes, Table2, LayoutTemplate, Layers, Eye, EyeOff, Lock, Unlock, Trash2, GripVertical, Search, Wifi, Contact, Link, Filter } from 'lucide-react';
+import { Type, Barcode, QrCode, Image as ImageIcon, Shapes, Table2, LayoutTemplate, Layers, Eye, EyeOff, Lock, Unlock, Trash2, GripVertical, Search, Wifi, Contact, Link, Filter, Apple, Truck } from 'lucide-react';
 import { useStore, type LeftPanel } from '../store';
 import { Panel, Modal } from './ui';
 import { t } from '../i18n';
@@ -12,6 +12,8 @@ import { TEMPLATES, TEMPLATE_CATEGORIES } from '../templates';
 import { thumbnail } from '../export';
 import { sizeLabel } from '../sizes';
 import { makeQr } from '../elements';
+import { openNutritionDialog } from './NutritionDialog';
+import { openCarrierDialog } from './CarrierDialog';
 
 export function LeftBar() {
   const st = useStore();
@@ -54,6 +56,10 @@ export function LeftBar() {
         <button className={'tool' + (st.leftPanel === 'layers' ? ' on' : '')} onClick={() => toggle('layers')} aria-label={t('Calques')}>
           <Layers />
           {t('Calques')}
+        </button>
+        <button className="tool" onClick={openCarrierDialog} aria-label={t('Étiquettes transporteur')} title={t('Étiquettes transporteur (ZPL, PDF, images)')}>
+          <Truck />
+          {t('Transport')}
         </button>
       </nav>
       {st.leftPanel === 'barcode' && <BarcodePanel />}
@@ -145,6 +151,16 @@ function TablePanel() {
       <div style={{ textAlign: 'center', fontWeight: 600 }}>
         {hover[0]} {t('lignes')} × {hover[1]} {t('colonnes')}
       </div>
+      <button
+        className="btn block"
+        style={{ marginTop: 10 }}
+        onClick={() => {
+          close();
+          openNutritionDialog();
+        }}
+      >
+        <Apple size={16} /> {t('Tableau nutritionnel…')}
+      </button>
     </Panel>
   );
 }

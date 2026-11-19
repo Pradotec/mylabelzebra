@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bold,
   Italic,
@@ -30,20 +30,33 @@ import {
   Braces,
   ImageUp,
   Info,
+  AlignHorizontalDistributeCenter,
+  AlignVerticalDistributeCenter,
+  StretchHorizontal,
+  StretchVertical,
+  ClipboardCheck,
+  Images,
+  Stamp,
+  AlertTriangle,
+  Columns3,
 } from 'lucide-react';
+import { distributeSelected, sameSizeSelected, addHealthMark, addEstimatedSign } from '../actions';
 import { useStore } from '../store';
-import type { LabelElement, TextEl, BarcodeEl, QrEl, ImageEl, ShapeEl, TableEl, CurveMode, Symbology, QrLevel } from '../types';
+import type { LabelElement, TextEl, BarcodeEl, QrEl, ImageEl, ShapeEl, TableEl, CurveMode, Symbology, QrLevel, MarkEl, FoodRole } from '../types';
 import { BASE_DPI } from '../types';
 import { Panel, NumField, Check, Seg, ColorPicker, Dropdown } from './ui';
 import { t } from '../i18n';
-import { FONTS, elementLabel, TYPE_LABELS } from '../elements';
-import { SYMBOLOGIES, encodeBarcode, encodeQr, qrPayload } from '../render/codes';
+import { FONTS, elementLabel, TYPE_LABELS, symbologyPatch } from '../elements';
+import { SYMBOLOGIES, encodeBarcode, encodeQr, qrPayload, is2D } from '../render/codes';
 import { shapeDef } from '../render/shapes';
 import { allergensFound } from '../render/allergens';
-import { Gs1Assistant, SsccAssistant, VarEanAssistant } from './Gs1Assist';
+import { Gs1Assistant, SsccAssistant, VarEanAssistant, isGs1AssistTarget } from './Gs1Assist';
 import { resolveText, unknownFilters, FILTERS, conditionHolds, conditionValue, promptFields } from '../render/resolve';
 import type { CondOp, ShowCondition } from '../types';
-import { elementHeight, hasFixedHeight, layoutText, fitMode } from '../render/draw';
+import { elementHeight, hasFixedHeight, layoutText, fitMode, incoCheck, incoIndices, xHeightRatio, gs1LogisticsCheck, GS1_LOGISTICS_MIN_H_MM, GS1_LOGISTICS_MIN_X_MM, INCO_SMALL_FACE_CM2, elText, isIncoMandatory, rollColumns, renderRollRow, rollGeometryU } from '../render/draw';
+import { FOOD_ROLES, INCO_ROLES } from '../render/foodRoles';
+import { estimatedHeightMm, ESTIMATED_MIN_MM } from '../render/marks';
+import { openSideDialog, useFoodReport } from './SideDialogs';
 import type { TextFit } from '../types';
 import { AlignJustify } from 'lucide-react';
 import { aabb } from './Editor';
@@ -53,7 +66,8 @@ import { pickFile } from '../util';
 export function PropertiesPanel() {
   const st = useStore();
   const sel = st.doc.elements.filter((e) => st.selected.includes(e.id));
-  if (!sel.length || st.leftPanel) return null;
+  if (st.leftPanel) return null;
+  if (!sel.length) return <DocPanel />;
   const el = sel.length === 1 ? sel[0] : undefined;
   return (
     <Panel
@@ -70,6 +84,9 @@ export function PropertiesPanel() {
       {el?.type === 'image' && <ImageProps el={el} />}
       {el?.type === 'shape' && <ShapeProps el={el} />}
       {el?.type === 'table' && <TableProps el={el} />}
+      {el?.type === 'mark' && <MarkProps el={el} />}
+      {el && <RoleSection el={el} />}
+      {el && <AnchorSection el={el} />}
       {el && <ConditionSection el={el} />}
       {el && <Geometry el={el} />}
       {sel.length > 1 && <MultiProps sel={sel} />}
@@ -214,6 +231,23 @@ function MultiProps({ sel }: { sel: LabelElement[] }) {
         <div className="sec-t">{t('Aligner sur l’étiquette')}</div>
         <AlignTools onAlign={(m) => alignEls(sel, m, true)} />
       </div>
+      <div className="sec">
+        <div className="sec-t">{t('Répartir et uniformiser')}</div>
+        <div className="row" style={{ gap: 2 }}>
+          <button className="icon-btn flat sm" disabled={sel.length < 3} title={t('Répartir horizontalement (espacement égal, 3 éléments ou plus)')} aria-label={t('Répartir horizontalement')} onClick={() => distributeSelected('h')}>
+            <AlignHorizontalDistributeCenter size={16} />
+          </button>
+          <button className="icon-btn flat sm" disabled={sel.length < 3} title={t('Répartir verticalement (espacement égal, 3 éléments ou plus)')} aria-label={t('Répartir verticalement')} onClick={() => distributeSelected('v')}>
+            <AlignVerticalDistributeCenter size={16} />
+          </button>
+          <button className="icon-btn flat sm" title={t('Même largeur que le premier élément sélectionné')} aria-label={t('Même largeur')} onClick={() => sameSizeSelected('w')}>
+            <StretchHorizontal size={16} />
+          </button>
+          <button className="icon-btn flat sm" title={t('Même hauteur que le premier élément sélectionné')} aria-label={t('Même hauteur')} onClick={() => sameSizeSelected('h')}>
+            <StretchVertical size={16} />
+          </button>
+        </div>
+      </div>
     </>
   );
 }
@@ -357,7 +391,8 @@ export function useFormatsHelp() {
         </tbody>
       </table>
       <div className="hint" style={{ marginTop: 6 }}>
-        {t('Champs spéciaux : {{numero}}, {{date}}, {{date+30}}, {{aujourdhui}}. {{?Nom}} : valeur demandée au moment d’imprimer.')}
+        {t('Champs spéciaux : {{numero}}, {{date}}, {{date+30}}, {{aujourdhui}}. {{?Nom}} : valeur demandée au moment d’imprimer.')}{' '}
+        {t('{{#sscc}} : SSCC du colis ; {{#pos}} / {{#total}} : position et nombre d’étiquettes du travail (colis « 1/N »).')}
       </div>
       <div className="hint">{t('Dates : JJ (jour), MM (mois), MMM / MMMM (mois en lettres), AA / AAAA (année), HH:mm.')}</div>
     </div>
@@ -409,6 +444,15 @@ export function FieldMenu({ onInsert }: { onInsert: (tok: string) => void }) {
           <button className="mi" onClick={() => (onInsert('{{?Lot}}'), close())}>
             {'{{?Lot}}'} <span className="k">{t('saisi à l’impression')}</span>
           </button>
+          <button className="mi" onClick={() => (onInsert('{{#sscc}}'), close())}>
+            {'{{#sscc}}'} <span className="k">{t('SSCC (palette / colis)')}</span>
+          </button>
+          <button className="mi" onClick={() => (onInsert('{{#pos}}'), close())}>
+            {'{{#pos}}'} <span className="k">{t('position dans le travail')}</span>
+          </button>
+          <button className="mi" onClick={() => (onInsert('{{#total}}'), close())}>
+            {'{{#total}}'} <span className="k">{t('nombre d’étiquettes du travail')}</span>
+          </button>
           {!cols.length && <div className="hint" style={{ padding: '4px 10px' }}>{t('Importez des données (panneau Données) pour voir vos colonnes ici.')}</div>}
         </>
       )}
@@ -427,7 +471,7 @@ function TextFitSection({ el }: { el: TextEl }) {
   const st = useStore();
   const mode = fitMode(el);
   const ctx = { doc: st.doc, index: st.previewRow, row: st.doc.data?.rows[st.previewRow], resolve: true };
-  const L = layoutText(el, resolveText(el.text, ctx), st.doc.allergensExtra);
+  const L = layoutText(el, elText(el, ctx), st.doc.allergensExtra);
   const opt = FIT_OPTIONS.find((o) => o.v === mode)!;
   const setMode = (v: TextFit) => {
     const patch: Partial<TextEl> = { fit: v, autoShrink: undefined };
@@ -519,6 +563,68 @@ function AllergenSection({ el }: { el: TextEl }) {
   );
 }
 
+/** Liste compacte de numéros de lignes (1-based) : « 2, 5, 7–9 … » */
+function rowList(idx: number[], max = 12): string {
+  const parts: string[] = [];
+  let i = 0;
+  while (i < idx.length && parts.length < max) {
+    let j = i;
+    while (j + 1 < idx.length && idx[j + 1] === idx[j] + 1) j++;
+    parts.push(j > i ? `${idx[i] + 1}–${idx[j] + 1}` : String(idx[i] + 1));
+    i = j + 1;
+  }
+  return parts.join(', ') + (i < idx.length ? ' …' : '');
+}
+
+const mm = (v: number) => (Math.round(v * 100) / 100).toLocaleString('fr-FR');
+
+/** Mention obligatoire INCO : hauteur de x imprimée ≥ 1,2 mm (0,9 mm si plus grande face < 80 cm²) */
+function IncoSection({ el }: { el: TextEl }) {
+  const st = useStore();
+  const doc = st.doc;
+  const mandatory = isIncoMandatory(el);
+  const byRole = !!el.role && INCO_ROLES.has(el.role);
+  const report = useMemo(() => (mandatory ? incoCheck(el, doc, incoIndices(doc)) : null), [el, doc, mandatory]);
+  const hasData = !!doc.data?.rows.length;
+  const cur = report?.byIndex.get(st.previewRow);
+  return (
+    <div className="sec">
+      <Check checked={mandatory} onChange={(v) => !byRole && up(el.id, { incoMandatory: v || undefined })} title={t('Contrôle la hauteur de x imprimée (règlement UE 1169/2011, art. 13 et annexe IV)')}>
+        {t('Mention obligatoire (INCO)')}
+      </Check>
+      {byRole && <div className="hint">{t('Automatique : le rôle réglementaire choisi est une mention obligatoire de l’art. 9.')}</div>}
+      {mandatory && report && (
+        <>
+          <NumField
+            label={t('Plus grande face de l’emballage')}
+            suffix="cm²"
+            decimals={0}
+            min={0}
+            max={100000}
+            value={el.incoFaceCm2 ?? 0}
+            onChange={(v) => up(el.id, { incoFaceCm2: v > 0 ? v : undefined }, 'inco' + el.id)}
+            title={t('Moins de {n} cm² : hauteur de x minimale 0,9 mm ; sinon 1,2 mm. 0 = non renseignée (1,2 mm).', { n: INCO_SMALL_FACE_CM2 })}
+          />
+          <div className="hint">
+            {t('Seuil : hauteur de x ≥ {s} mm', { s: mm(report.thresholdMm) })}
+            {cur !== undefined ? ' · ' + t('ligne affichée : {v} mm', { v: mm(cur) }) : ''}
+          </div>
+          {report.failing.length ? (
+            <div className="err">
+              {hasData
+                ? t('Hauteur de x sous le seuil (min. {v} mm) après réduction automatique, lignes : {l}', { v: mm(report.minMm), l: rowList(report.failing) })
+                : t('Hauteur de x sous le seuil : {v} mm imprimés', { v: mm(report.minMm) })}
+            </div>
+          ) : report.byIndex.size ? (
+            <div className="okmsg">{t('Conforme : hauteur de x minimale {v} mm', { v: mm(report.minMm) })}</div>
+          ) : null}
+          <div className="hint">{t('Hauteur de x estimée d’après la police ({r} × taille) ; taille finale après réduction automatique, pour chaque ligne de données.', { r: mm(xHeightRatio(el.fontFamily)) })}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function TextProps({ el }: { el: TextEl }) {
   const curve = el.curve || 'none';
   const help = useFormatsHelp();
@@ -582,6 +688,12 @@ function TextProps({ el }: { el: TextEl }) {
       </Check>
       <AllergenSection el={el} />
       <TextFitSection el={el} />
+      {el.text.includes('\n') && el.text.includes('{{') && (
+        <Check checked={!!el.removeEmptyLines} onChange={(v) => up(el.id, { removeEmptyLines: v || undefined })} title={t('Une ligne qui ne contient que des champs vides disparaît et les lignes suivantes remontent (adresses)')}>
+          {t('Supprimer les lignes vides')}
+        </Check>
+      )}
+      <IncoSection el={el} />
       <div className="sec">
         <div className="sec-t">{t('Texte courbé')}</div>
         <select
@@ -615,9 +727,11 @@ function TextProps({ el }: { el: TextEl }) {
 function BarcodeProps({ el }: { el: BarcodeEl }) {
   const st = useStore();
   const info = SYMBOLOGIES.find((s) => s.id === el.symbology)!;
-  const resolved = resolveText(el.value, { doc: st.doc, index: st.previewRow, row: st.doc.data?.rows[st.previewRow], resolve: true });
+  const rctx = { doc: st.doc, index: st.previewRow, row: st.doc.data?.rows[st.previewRow], resolve: true };
+  const resolved = resolveText(el.value, rctx);
   const enc = encodeBarcode(resolved, el.symbology);
-  const twoD = el.symbology === 'datamatrix';
+  const twoD = is2D(el.symbology);
+  const logi = enc.error === undefined ? gs1LogisticsCheck(el, rctx) : null;
   const help = useFormatsHelp();
   return (
     <>
@@ -628,10 +742,9 @@ function BarcodeProps({ el }: { el: BarcodeEl }) {
           value={el.symbology}
           onChange={(e) => {
             const s = e.target.value as Symbology;
-            const d2 = s === 'datamatrix';
             const sample = SYMBOLOGIES.find((x) => x.id === s)!.sample;
             const ok = encodeBarcode(el.value, s).error === undefined || /\{\{/.test(el.value);
-            up(el.id, { symbology: s, value: ok ? el.value : sample, showText: d2 ? false : el.showText, ...(d2 !== twoD ? { h: d2 ? el.w * 0.4 : 130, w: d2 ? el.w * 0.4 : Math.max(el.w, 300) } : {}) });
+            up(el.id, { ...symbologyPatch(el, s), value: ok ? el.value : sample });
           }}
         >
           {SYMBOLOGIES.map((s) => (
@@ -655,7 +768,14 @@ function BarcodeProps({ el }: { el: BarcodeEl }) {
       <FilterWarning text={el.value} />
       {enc.error !== undefined ? <div className="err">{enc.error}</div> : <div className="hint">{t(info.hint)}</div>}
       {resolved !== el.value && enc.error === undefined && <div className="hint">→ {resolved}</div>}
-      {el.symbology === 'gs1-128' && <Gs1Assistant el={el} />}
+      {logi && (logi.lowH || logi.lowX) && (
+        <div className="err">
+          {t('Logistique GS1 (palettes, colis) :')}
+          {logi.lowH ? ' ' + t('hauteur des barres {v} mm < {m} mm.', { v: mm(logi.barMm), m: mm(GS1_LOGISTICS_MIN_H_MM) }) : ''}
+          {logi.lowX ? ' ' + t('module X {v} mm < {m} mm.', { v: mm(logi.xMm), m: mm(GS1_LOGISTICS_MIN_X_MM) }) : ''}
+        </div>
+      )}
+      {isGs1AssistTarget(el.symbology) && <Gs1Assistant key={el.id} el={el} />}
       {el.symbology === 'sscc18' && <SsccAssistant el={el} />}
       {el.symbology === 'ean13' && <VarEanAssistant el={el} />}
       {!twoD && (
@@ -940,3 +1060,247 @@ function TableProps({ el }: { el: TableEl }) {
   );
 }
 
+
+// ---------- Rôle réglementaire, positionnement relatif ----------
+
+/** Rôle de l'élément dans l'étiquetage alimentaire (règl. UE 1169/2011) */
+function RoleSection({ el }: { el: LabelElement }) {
+  const r = FOOD_ROLES.find((x) => x.id === el.role);
+  return (
+    <div className="sec">
+      <label className="f">
+        {t('Rôle réglementaire')}
+        <select className="inp" value={el.role ?? ''} onChange={(e) => up(el.id, { role: (e.target.value || undefined) as FoodRole | undefined })}>
+          <option value="">{t('Aucun')}</option>
+          {FOOD_ROLES.map((o) => (
+            <option key={o.id} value={o.id}>
+              {t(o.label)}
+            </option>
+          ))}
+        </select>
+      </label>
+      {r && <div className="hint">{t(r.hint)}</div>}
+      {r && (
+        <button className="btn sm flat" onClick={() => openSideDialog('food')}>
+          <ClipboardCheck size={14} /> {t('Conformité alimentaire…')}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** « Remonter si l'élément au-dessus est masqué ou vide » : ancre verticale */
+function AnchorSection({ el }: { el: LabelElement }) {
+  const els = useStore((s) => s.doc.elements);
+  // pas d'ancre vers soi-même ni vers un élément déjà ancré (directement ou non) à celui-ci
+  const dependsOn = (id: string, target: string, seen = new Set<string>()): boolean => {
+    if (id === target) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const a = els.find((e) => e.id === id)?.anchorTo;
+    return !!a && dependsOn(a, target, seen);
+  };
+  const options = els.filter((o) => o.id !== el.id && !dependsOn(o.id, el.id));
+  const anchor = els.find((o) => o.id === el.anchorTo);
+  return (
+    <div className="sec">
+      <label className="f">
+        {t('Remonter sous un autre élément')}
+        <select className="inp" value={anchor ? anchor.id : ''} onChange={(e) => up(el.id, { anchorTo: e.target.value || undefined })}>
+          <option value="">{t('Non (position fixe)')}</option>
+          {options.map((o) => (
+            <option key={o.id} value={o.id}>
+              {elementLabel(o)}
+            </option>
+          ))}
+        </select>
+      </label>
+      {anchor && (
+        <div className="hint">
+          {t('Écart conservé sous « {n} » ; s’il est masqué, non imprimé (condition) ou vide sur une ligne, cet élément prend sa place. Appliqué dans l’aperçu, à l’impression, en PDF/SVG et en ZPL.', { n: elementLabel(anchor) })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Marques réglementaires ----------
+
+const MM_U = BASE_DPI / 25.4;
+
+function MarkProps({ el }: { el: MarkEl }) {
+  const [custom, setCustom] = useState(el.suffix !== 'CE' && el.suffix !== 'UE' && el.suffix !== '');
+  if (el.kind === 'estimated') {
+    const hmm = estimatedHeightMm(el, BASE_DPI);
+    return (
+      <>
+        <div className="hint">{t('Signe ℮ (quantité estimée) : directive 76/211/CEE, annexe I point 3.3 — « au moins 3 mm de hauteur », dans le même champ visuel que la quantité nominale.')}</div>
+        <div className="grid2">
+          <NumField label={t('Hauteur')} suffix="mm" decimals={2} min={0.5} max={100} step={0.5} value={hmm} onChange={(v) => up(el.id, { w: v * MM_U, h: v * MM_U }, 'emark')} />
+          <ColorPicker label={t('Couleur')} value={el.color} onChange={(c) => up(el.id, { color: c === 'none' ? '#000000' : c })} />
+        </div>
+        {hmm < ESTIMATED_MIN_MM - 1e-6 ? (
+          <div className="err">
+            <AlertTriangle size={14} style={{ verticalAlign: -2 }} /> {t('Hauteur {v} mm : la directive 76/211/CEE impose au moins {m} mm.', { v: mm(hmm), m: ESTIMATED_MIN_MM })}{' '}
+            <button className="btn sm flat" onClick={() => up(el.id, { w: ESTIMATED_MIN_MM * MM_U, h: ESTIMATED_MIN_MM * MM_U })}>
+              {t('Mettre à 3 mm')}
+            </button>
+          </div>
+        ) : (
+          <div className="okmsg">{t('Hauteur conforme ({v} mm ≥ {m} mm).', { v: mm(hmm), m: ESTIMATED_MIN_MM })}</div>
+        )}
+        <div className="hint">{t('Imprimé en image (^GFA) dans le ZPL pour respecter exactement le dessin.')}</div>
+      </>
+    );
+  }
+  const suffixMode = custom ? 'autre' : el.suffix || 'CE';
+  return (
+    <>
+      <div className="hint">{t('Estampille sanitaire / marque d’identification ovale (règl. CE 853/2004, annexe II section I) : pays, numéro d’agrément de l’établissement, abréviation de l’UE.')}</div>
+      <div className="grid2">
+        <label className="f">
+          {t('Pays')}
+          <input className="inp" value={el.country} maxLength={20} placeholder="FR" onChange={(e) => up(el.id, { country: e.target.value }, 'mk-c' + el.id)} onKeyDown={(e) => e.stopPropagation()} />
+        </label>
+        <label className="f">
+          {t('Mention finale')}
+          <select
+            className="inp"
+            value={suffixMode}
+            onChange={(e) => {
+              const v = e.target.value;
+              setCustom(v === 'autre');
+              if (v !== 'autre') up(el.id, { suffix: v });
+            }}
+          >
+            <option value="CE">CE</option>
+            <option value="UE">UE</option>
+            <option value="autre">{t('Autre texte')}</option>
+          </select>
+        </label>
+      </div>
+      {custom && (
+        <label className="f">
+          {t('Texte de la mention finale')}
+          <input className="inp" value={el.suffix} placeholder="EC, EG, EY…" onChange={(e) => up(el.id, { suffix: e.target.value }, 'mk-s' + el.id)} onKeyDown={(e) => e.stopPropagation()} />
+        </label>
+      )}
+      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 2 }}>
+        <span style={{ fontSize: 12.5 }}>{t('Numéro d’agrément')}</span>
+        <FieldMenu onInsert={(tok) => up(el.id, { approval: el.approval + tok })} />
+      </div>
+      <input className="inp" value={el.approval} placeholder="75.056.001" onChange={(e) => up(el.id, { approval: e.target.value }, 'mk-a' + el.id)} onKeyDown={(e) => e.stopPropagation()} aria-label={t('Numéro d’agrément')} />
+      <FilterWarning text={el.approval} />
+      <div className="grid2">
+        <ColorPicker label={t('Couleur')} value={el.color} onChange={(c) => up(el.id, { color: c === 'none' ? '#000000' : c })} />
+        <NumField label={t('Épaisseur du contour')} min={0} max={40} value={el.strokeWidth} onChange={(v) => up(el.id, { strokeWidth: v }, 'mk-sw')} />
+        <label className="f">
+          {t('Police')}
+          <select className="inp" value={el.fontFamily || 'Arial'} onChange={(e) => up(el.id, { fontFamily: e.target.value })}>
+            {FONTS.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="hint">{t('Le texte est ajusté automatiquement à l’ovale. ZPL : ovale ^GE et texte natif (police linéale), sinon image.')}</div>
+    </>
+  );
+}
+
+// ---------- Panneau à vide : document ----------
+
+function DocPanel() {
+  const st = useStore();
+  const report = useFoodReport();
+  const cols = rollColumns(st.doc);
+  const roll = st.doc.roll ?? { columns: 1, gapMm: 3, leftMm: 0 };
+  const setRoll = (p: Partial<typeof roll>) =>
+    st.setDoc((d) => {
+      const next = { ...roll, ...p };
+      d.roll = next.columns > 1 ? next : undefined;
+    }, 'roll');
+  return (
+    <Panel className="props" title={t('Étiquette')} icon={<SlidersHorizontal size={16} />}>
+      <div className="sec-t">{t('Insérer')}</div>
+      <div className="row" style={{ flexWrap: 'wrap', gap: 4 }}>
+        <button className="btn sm" onClick={addHealthMark} title={t('Estampille sanitaire ovale (règl. CE 853/2004)')}>
+          <Stamp size={14} /> {t('Estampille')}
+        </button>
+        <button className="btn sm" onClick={addEstimatedSign} title={t('Signe ℮ de quantité estimée (directive 76/211/CEE)')}>
+          ℮ {t('Signe ℮')}
+        </button>
+        <button className="btn sm" onClick={() => openSideDialog('pictos')}>
+          <Images size={14} /> {t('Mes pictogrammes…')}
+        </button>
+      </div>
+      <div className="sec">
+        <div className="sec-t">{t('Conformité alimentaire')}</div>
+        {report.used ? (
+          report.missing.length || report.dateIssues.length || report.inco.length ? (
+            <div className="err">{t('{n} point(s) à vérifier', { n: report.missing.length + report.dateIssues.length + report.inco.length })}</div>
+          ) : (
+            <div className="okmsg">{t('Mentions toujours obligatoires présentes')}</div>
+          )
+        ) : (
+          <div className="hint">{t('Attribuez un rôle réglementaire aux mentions (dénomination, ingrédients…) pour vérifier l’étiquette.')}</div>
+        )}
+        <button className="btn sm flat" onClick={() => openSideDialog('food')}>
+          <ClipboardCheck size={14} /> {t('Vérifier les mentions…')}
+        </button>
+      </div>
+      <div className="sec">
+        <div className="sec-t">
+          <Columns3 size={14} style={{ verticalAlign: -2 }} /> {t('Étiquettes de front sur le rouleau')}
+        </div>
+        <Seg
+          value={String(cols) as '1' | '2' | '3'}
+          onChange={(v) => setRoll({ columns: Number(v) })}
+          options={[
+            { v: '1', label: '1' },
+            { v: '2', label: '2' },
+            { v: '3', label: '3' },
+          ]}
+        />
+        {cols > 1 && (
+          <>
+            <div className="grid2" style={{ marginTop: 6 }}>
+              <NumField label={t('Écart entre étiquettes')} suffix="mm" decimals={1} min={0} max={50} step={0.5} value={roll.gapMm} onChange={(v) => setRoll({ gapMm: v })} />
+              <NumField label={t('Marge gauche')} suffix="mm" decimals={1} min={0} max={50} step={0.5} value={roll.leftMm} onChange={(v) => setRoll({ leftMm: v })} />
+            </div>
+            <RollPreview />
+            <div className="hint">
+              {t('Impression Zebra : les étiquettes successives du lot sont placées côte à côte, une rangée par format (^PW = largeur totale du rouleau : {w} mm). La dernière rangée peut rester incomplète.', {
+                w: mm((rollGeometryU(st.doc).totalW / BASE_DPI) * 25.4),
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+/** Aperçu d'une rangée du rouleau (étiquettes du lot à partir de la ligne affichée) */
+function RollPreview() {
+  const doc = useStore((s) => s.doc);
+  const row = useStore((s) => s.previewRow);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const box = ref.current;
+    if (!box) return;
+    const cols = rollColumns(doc);
+    const n = doc.data?.rows.length ?? 0;
+    const slots = Array.from({ length: cols }, (_, k) => (n ? Math.min(n - 1, row + k) : k));
+    const geo = rollGeometryU(doc);
+    const cv = renderRollRow(doc, slots, { scale: Math.min(1, 260 / geo.totalW) });
+    cv.style.maxWidth = '100%';
+    cv.style.border = '1px dashed var(--line)';
+    cv.style.background = '#fff';
+    box.innerHTML = '';
+    box.appendChild(cv);
+  }, [doc, row]);
+  return <div ref={ref} style={{ display: 'grid', placeItems: 'center', background: 'var(--bg)', borderRadius: 10, padding: 8, marginTop: 6 }} aria-label={t('Aperçu du rouleau')} />;
+}

@@ -14,7 +14,7 @@ import { normalizeDoc } from './elements';
 import { batchJobs } from './render/resolve';
 import { startJob, type JobKind } from './jobs';
 import { prefGet, prefSet } from './storage';
-import { deepClone } from './util';
+import { deepClone, uid } from './util';
 import { t } from './i18n';
 
 export interface RemoteJob {
@@ -101,7 +101,11 @@ async function findModel(m: string): Promise<LabelDoc | null> {
   return hit ? normalizeDoc(deepClone(hit.doc)) : null;
 }
 
-function confirmRemote(doc: LabelDoc, kind: JobKind, source: string): Promise<boolean> {
+/**
+ * Bandeau de confirmation. `kind` null = simple ouverture du modèle (sans impression),
+ * `unsaved` = l'étiquette en cours a des modifications non enregistrées qui seront remplacées.
+ */
+function confirmRemote(doc: LabelDoc, kind: JobKind | null, source: string, unsaved: boolean): Promise<boolean> {
   const count = batchJobs(doc, 0).reduce((a, j) => a + j.copies, 0);
   return new Promise((resolve) => {
     useStore.setState({
@@ -109,16 +113,24 @@ function confirmRemote(doc: LabelDoc, kind: JobKind, source: string): Promise<bo
         source,
         docName: doc.name,
         docId: doc.id,
-        target: TARGET_LABELS[kind] ?? kind,
+        target: kind ? (TARGET_LABELS[kind] ?? kind) : '',
         count,
+        open: !kind,
+        unsaved,
         resolve: (ok, remember) => {
           useStore.setState({ remoteRequest: null });
-          if (ok && remember) setAutoPrint(doc.id, doc.name, source, true);
+          if (ok && remember && kind) setAutoPrint(doc.id, doc.name, source, true);
           resolve(ok);
         },
       },
     });
   });
+}
+
+/** L'étiquette en cours serait perdue si on la remplaçait */
+function hasUnsavedWork(): boolean {
+  const s = useStore.getState();
+  return s.dirty && s.doc.elements.length > 0;
 }
 
 let queue: Promise<unknown> = Promise.resolve();
@@ -139,29 +151,60 @@ async function runRemoteNow(job: RemoteJob): Promise<RemoteResult> {
     return { ok: false, count: 0, error: 'modele introuvable' };
   }
   if (job.rows && !Array.isArray(job.rows)) return { ok: false, count: 0, error: 'rows doit être un tableau' };
+  const target = (job.imprimer || '').toLowerCase();
+  const kind = target ? TARGETS[target] : null;
+  // paramètre invalide : refusé AVANT de toucher au document en cours
+  if (target && !kind) return { ok: false, count: 0, error: `imprimer=${job.imprimer} inconnu (zebra, ordinateur, pdf, zpl)` };
+  const injected = !!job.rows?.length || !!job.copies;
   if (job.rows?.length) doc.data = rowsToData(job.rows, job.copies);
   else if (job.copies) doc.copies = Math.max(1, Math.min(9999, Math.round(job.copies)));
-  st.loadDoc(doc, true);
-  useStore.setState({ previewRow: 0, showData: true, dirty: false });
-  const target = (job.imprimer || '').toLowerCase();
-  if (!target) return { ok: true, count: 0 };
-  const kind = TARGETS[target];
-  if (!kind) return { ok: false, count: 0, error: `imprimer=${job.imprimer} inconnu (zebra, ordinateur, pdf, zpl)` };
-  const loaded = useStore.getState().doc;
-  if (!isAutoPrint(loaded.id, job.source)) {
-    const ok = await confirmRemote(loaded, kind, job.source);
+
+  const unsaved = hasUnsavedWork();
+  const auto = !!kind && isAutoPrint(doc.id, job.source);
+  // Confirmation AVANT tout remplacement : toujours pour une impression non autorisée
+  // d'avance, et pour une simple ouverture si l'étiquette en cours n'est pas enregistrée.
+  if ((kind && !auto) || (!kind && unsaved)) {
+    const ok = await confirmRemote(doc, kind, job.source, unsaved);
     if (!ok) return { ok: false, count: 0, error: 'annulé par l’utilisateur' };
   }
+  // Impression automatique alors que l'étiquette en cours n'est pas enregistrée :
+  // on imprime le modèle sans remplacer le travail en cours.
+  const replace = !(auto && unsaved);
+  if (replace) {
+    useStore.getState().loadDoc(editorCopy(doc, injected), true);
+    // le document chargé reste « modifié » (loadDoc) : il n'est pas enregistré dans « Mes étiquettes »
+    useStore.setState({ previewRow: 0, showData: true });
+  } else st.toast(t('Impression automatique de « {d} » : l’étiquette en cours est conservée.', { d: doc.name }), 'info');
+  if (!kind) return { ok: true, count: 0 };
   if (kind === 'zebra') useStore.getState().set('printer', 'zebra');
-  const n = await startJob(kind, { prompts: job.prompts, source: job.source, currentRow: 0 });
+  // le travail porte l'identifiant du modèle (valeurs saisies mémorisées, historique)
+  const n = await startJob(kind, { doc, prompts: job.prompts, source: job.source, currentRow: 0 });
   return n == null ? { ok: false, count: 0, error: 'impression annulée ou en échec' } : { ok: true, count: n };
 }
 
+/**
+ * Copie du modèle pour l'éditeur. Si des données (lignes, copies) ont été injectées,
+ * la copie reçoit un nouvel identifiant et un nom distinct : un « Enregistrer » ne
+ * remplace pas le modèle de « Mes étiquettes » par les lignes reçues (toutes cochées).
+ */
+export function editorCopy(doc: LabelDoc, injected: boolean): LabelDoc {
+  const d = deepClone(doc);
+  if (injected) {
+    d.id = uid();
+    d.name = t('{n} (données reçues)', { n: doc.name });
+  }
+  return d;
+}
+
 /** Lien : ?modele=… (appelé une fois au démarrage) */
-export function applyRemoteUrl(): boolean {
-  const p = new URLSearchParams(location.search);
+/**
+ * Décode les paramètres d'un lien. null = pas de demande (pas de « modele ») ;
+ * `{ error }` = paramètre « data » illisible.
+ */
+export function parseRemoteUrl(search: string): RemoteJob | { error: string } | null {
+  const p = new URLSearchParams(search);
   const modele = p.get('modele');
-  if (!modele) return false;
+  if (!modele) return null;
   let rows: Record<string, unknown>[] | undefined;
   const data = p.get('data');
   if (data) {
@@ -169,8 +212,7 @@ export function applyRemoteUrl(): boolean {
       const parsed = JSON.parse(decodeBase64Url(data));
       rows = Array.isArray(parsed) ? parsed : [parsed];
     } catch {
-      useStore.getState().toast(t('Paramètre « data » illisible (JSON en base64url attendu)'), 'error');
-      return true;
+      return { error: t('Paramètre « data » illisible (JSON en base64url attendu)') };
     }
   }
   const prompts: Record<string, string> = {};
@@ -178,10 +220,25 @@ export function applyRemoteUrl(): boolean {
     if (k.startsWith('invite.')) prompts[k.slice(7)] = v;
   });
   const copies = parseInt(p.get('copies') || '', 10);
+  return { modele, rows, prompts, imprimer: p.get('imprimer') || undefined, copies: isNaN(copies) ? undefined : copies, source: 'url' };
+}
+
+/** Lien : ?modele=… (appelé une fois au démarrage). Vrai si le lien contenait une demande. */
+export function applyRemoteUrl(): boolean {
+  return startRemoteUrl() !== null;
+}
+/** Comme applyRemoteUrl, mais renvoie la promesse du travail (null = pas de demande). */
+export function startRemoteUrl(): Promise<RemoteResult> | null {
+  const job = parseRemoteUrl(location.search);
+  if (!job) return null;
+  const lang = new URLSearchParams(location.search).get('lang');
   // le lien n'est traité qu'une fois (pas de réimpression en rafraîchissant la page)
-  history.replaceState(null, '', location.pathname + (p.get('lang') ? `?lang=${p.get('lang')}` : ''));
-  void runRemote({ modele, rows, prompts, imprimer: p.get('imprimer') || undefined, copies: isNaN(copies) ? undefined : copies, source: 'url' });
-  return true;
+  history.replaceState(null, '', location.pathname + (lang ? `?lang=${lang}` : ''));
+  if ('error' in job) {
+    useStore.getState().toast(job.error, 'error');
+    return Promise.resolve({ ok: false, count: 0, error: job.error });
+  }
+  return runRemote(job);
 }
 
 /** postMessage : à installer une fois */

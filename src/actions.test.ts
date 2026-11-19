@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { setLabelSize, setResizeMode, getResizeMode } from './actions';
+import { setLabelSize, setResizeMode, getResizeMode, distributeSelected, distributePatches, sameSizeSelected, sameSizePatches } from './actions';
 import { useStore } from './store';
 import { newDoc, makeShape, makeText } from './elements';
 import type { ShapeEl, TextEl } from './types';
@@ -64,6 +64,76 @@ describe('setLabelSize — mode « scale »', () => {
     setLabelSize(0.01, 100);
     expect(S().doc.widthIn).toBe(0.25);
     expect(S().doc.heightIn).toBe(40);
+  });
+});
+
+describe('répartir / uniformiser', () => {
+  function loadRow() {
+    const d = newDoc({ widthIn: 4, heightIn: 2 });
+    const sh = (id: string, x: number, y: number, w: number, h: number): ShapeEl => ({ ...makeShape(d, 'rect'), id, x, y, w, h });
+    // ordre de sélection volontairement différent de l'ordre spatial
+    d.elements = [sh('a', 0, 0, 50, 40), sh('c', 400, 100, 100, 20), sh('b', 90, 30, 30, 60), sh('d', 200, 10, 20, 20)];
+    S().loadDoc(d);
+    S().select(['b', 'a', 'd', 'c']);
+  }
+  const get = (id: string) => els().find((e) => e.id === id)!;
+
+  it('répartir horizontalement : extrêmes fixes, espaces égaux, une seule annulation', () => {
+    loadRow();
+    const before = S().past.length;
+    distributeSelected('h');
+    // étendue 0 → 500, largeurs 50+30+20+100 = 200 → écart (500 − 200) / 3 = 100
+    expect(get('a').x).toBe(0);
+    expect(get('b').x).toBeCloseTo(150, 9);
+    expect(get('d').x).toBeCloseTo(280, 9);
+    expect(get('c').x).toBe(400);
+    expect(S().past.length).toBe(before + 1);
+    S().undo();
+    expect(get('b').x).toBe(90);
+    expect(get('d').x).toBe(200);
+  });
+
+  it('répartir verticalement (centres triés) ; moins de 3 éléments : rien', () => {
+    loadRow();
+    distributeSelected('v');
+    // tri par centre : a (20), d (20, ex æquo : ordre de sélection), b (60), c (110) ;
+    // étendue 0 → 120, hauteurs 140 → écart −20/3
+    const [a, d, b, c] = ['a', 'd', 'b', 'c'].map((id) => get(id));
+    const gap = (120 - 140) / 3;
+    expect(a.y).toBe(0);
+    expect(d.y).toBeCloseTo(40 + gap, 9);
+    expect(b.y).toBeCloseTo(d.y + 20 + gap, 9);
+    expect(c.y).toBe(100);
+    expect(distributePatches(els().slice(0, 2), 'h', (e) => e).size).toBe(0);
+  });
+
+  it('élément verrouillé : non déplacé', () => {
+    loadRow();
+    S().updateEls(['b'], { locked: true });
+    distributeSelected('h');
+    expect(get('b').x).toBe(90);
+    expect(get('d').x).toBeCloseTo(280, 9);
+  });
+
+  it('même largeur / même hauteur que le premier sélectionné, annulable en une fois', () => {
+    loadRow();
+    const before = S().past.length;
+    sameSizeSelected('w');
+    expect(els().map((e) => e.w)).toEqual([30, 30, 30, 30]);
+    expect(S().past.length).toBe(before + 1);
+    sameSizeSelected('h');
+    expect(els().map((e) => e.h)).toEqual([60, 60, 60, 60]);
+    S().undo();
+    S().undo();
+    expect(get('c')).toMatchObject({ w: 100, h: 20 });
+  });
+
+  it('texte à hauteur automatique : hauteur inchangée', () => {
+    const d = newDoc();
+    const a = { ...makeShape(d, 'rect'), id: 'a', h: 90 };
+    const tx: TextEl = { ...makeText(d, 'x'), id: 't', fit: 'wrapGrow', h: 30 };
+    expect(sameSizePatches([a, tx], 'h', a).size).toBe(0);
+    expect(sameSizePatches([a, { ...tx, fit: 'none' }], 'h', a).get('t')).toEqual({ h: 90 });
   });
 });
 

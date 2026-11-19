@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type CSSProperties } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode, type CSSProperties } from 'react';
 import { X, Pipette } from 'lucide-react';
 import { t } from '../i18n';
 import { isNone } from '../render/draw';
@@ -58,18 +58,105 @@ export function Dropdown({
   );
 }
 
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+
+/** Éléments focalisables visibles d'un conteneur, dans l'ordre du document */
+export function focusables(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => !el.hasAttribute('inert') && el.getAttribute('aria-hidden') !== 'true' && (el.offsetParent !== null || el.getClientRects?.().length > 0 || el === document.activeElement));
+}
+
+/** Pile des fenêtres ouvertes : seule la plus haute réagit à Échap et piège le focus */
+const modalStack: object[] = [];
+
 export function Modal({ title, onClose, children, footer, wide, icon }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean; icon?: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const [me] = useState(() => ({}));
+  const isTop = () => modalStack[modalStack.length - 1] === me;
+
+  // pile, focus initial et restitution du focus à la fermeture
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const previous = document.activeElement as HTMLElement | null;
+    modalStack.push(me);
+    const box = ref.current;
+    if (box && !box.contains(document.activeElement)) {
+      // un champ (autoFocus) a déjà pu prendre le focus ; sinon premier champ de saisie,
+      // sinon la fenêtre elle-même (Entrée ne déclenche pas un bouton par mégarde, Tab
+      // mène au premier contrôle)
+      const body = box.querySelector('.modal-b');
+      const field = focusables(box).find((el) => body?.contains(el) && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && (el as HTMLInputElement).type !== 'checkbox' && (el as HTMLInputElement).type !== 'radio');
+      (field ?? box).focus({ preventScroll: true });
+    }
+    return () => {
+      const i = modalStack.indexOf(me);
+      if (i >= 0) modalStack.splice(i, 1);
+      if (previous && previous.isConnected && typeof previous.focus === 'function') previous.focus({ preventScroll: true });
+    };
+  }, [me]);
+
+  // Échap (fenêtre du dessus) et focus ramené dans la fenêtre s'il en sort
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isTop()) onCloseRef.current();
+    };
+    const fin = (e: FocusEvent) => {
+      const box = ref.current;
+      const target = e.target as HTMLElement;
+      if (!box || !isTop() || box.contains(target)) return;
+      // bandeaux non modaux (progression / annulation, demande d'impression, notifications) : accessibles
+      if (target?.closest?.('.remote-banner, .toasts, [data-focus-outside-ok]')) return;
+      box.focus({ preventScroll: true });
+    };
     window.addEventListener('keydown', k);
-    return () => window.removeEventListener('keydown', k);
-  }, [onClose]);
+    document.addEventListener('focusin', fin);
+    return () => {
+      window.removeEventListener('keydown', k);
+      document.removeEventListener('focusin', fin);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Tab / Maj+Tab piégés dans la fenêtre
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'Tab' || !ref.current) return;
+    const list = focusables(ref.current);
+    if (!list.length) {
+      e.preventDefault();
+      ref.current.focus();
+      return;
+    }
+    const first = list[0];
+    const last = list[list.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === ref.current)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
     <div className="overlay" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={'modal' + (wide ? ' wide' : '')} role="dialog" aria-label={typeof title === 'string' ? title : undefined}>
+      <div
+        ref={ref}
+        className={'modal' + (wide ? ' wide' : '')}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
+        style={{ outline: 'none' }}
+      >
         <div className="modal-h">
           {icon}
-          <div style={{ flex: 1 }}>{title}</div>
+          <div id={titleId} style={{ flex: 1 }}>
+            {title}
+          </div>
           <button className="icon-btn flat" onClick={onClose} aria-label={t('Fermer')}>
             <X size={18} />
           </button>

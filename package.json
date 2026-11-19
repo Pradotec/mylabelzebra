@@ -16,6 +16,7 @@
     "konva": "9.3.16",
     "lucide-react": "0.460.0",
     "papaparse": "5.4.1",
+    "pdfjs-dist": "6.5.438",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-konva": "18.2.10",

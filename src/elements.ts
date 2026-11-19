@@ -1,4 +1,4 @@
-import type { LabelDoc, LabelElement, TextEl, BarcodeEl, QrEl, ShapeEl, TableEl, ImageEl, Symbology } from './types';
+import type { LabelDoc, LabelElement, TextEl, BarcodeEl, QrEl, ShapeEl, TableEl, ImageEl, Symbology, MarkEl, MarkKind } from './types';
 import { BASE_DPI } from './types';
 import { uid } from './util';
 import { shapeDef } from './render/shapes';
@@ -25,10 +25,16 @@ export function newDoc(partial: Partial<LabelDoc> = {}): LabelDoc {
   };
 }
 
-/** Complète un document importé (anciennes versions, JSON externe). */
-export function normalizeDoc(d: Partial<LabelDoc>): LabelDoc {
+/**
+ * Complète un document importé (anciennes versions, JSON externe) destiné à l'éditeur.
+ * La plage SSCC réservée d'un travail (ssccJob) n'a de sens que sur la copie figée d'un
+ * travail : elle est retirée, sauf demande explicite (keepJob, documents de travail).
+ */
+export function normalizeDoc(d: Partial<LabelDoc>, opts: { keepJob?: boolean } = {}): LabelDoc {
   const base = newDoc();
   const doc = { ...base, ...d } as LabelDoc;
+  if (!opts.keepJob) delete doc.ssccJob;
+  if (doc.roll && !(Number(doc.roll.columns) > 1)) delete doc.roll;
   doc.guides = d.guides ?? { x: [], y: [] };
   doc.numbering = { ...base.numbering, ...(d.numbering || {}) };
   doc.date = { ...base.date, ...(d.date || {}) };
@@ -45,6 +51,14 @@ export function normalizeDoc(d: Partial<LabelDoc>): LabelDoc {
     if (n.type === 'text' && !n.fit) {
       n.fit = n.autoShrink ? 'wrapShrink' : 'wrapGrow';
       delete n.autoShrink;
+    }
+    if (n.type === 'mark') {
+      n.kind = n.kind === 'estimated' ? 'estimated' : 'health';
+      n.country = n.country ?? '';
+      n.approval = n.approval ?? '';
+      n.suffix = n.suffix ?? '';
+      n.color = n.color || '#000000';
+      n.strokeWidth = Number(n.strokeWidth) >= 0 ? Number(n.strokeWidth) : 3;
     }
     return n;
   });
@@ -105,16 +119,38 @@ export function makeText(doc: LabelDoc, text = t('Votre texte'), extra: Partial<
   });
 }
 
+/** Taille par défaut d'un code (u) : carré pour les 2D, large pour PDF417 / DataBar empilé */
+export function barcodeDefaultSize(s: Symbology): { w: number; h: number } {
+  if (s === 'pdf417') return { w: 360, h: 120 };
+  if (s === 'databarstackedomni') return { w: 150, h: 200 };
+  return is2D(s) ? { w: 140, h: 140 } : { w: 380, h: 130 };
+}
+
+/** Changement de symbologie : texte lisible et proportions adaptés (2D ↔ linéaire) */
+export function symbologyPatch(el: BarcodeEl, s: Symbology): Partial<BarcodeEl> {
+  const d2 = is2D(s);
+  const was = is2D(el.symbology);
+  const p: Partial<BarcodeEl> = { symbology: s, showText: d2 ? false : el.showText };
+  if (d2 !== was || s === 'pdf417' || el.symbology === 'pdf417') {
+    const def = barcodeDefaultSize(s);
+    const w = d2 ? Math.max(60, el.w * 0.4) : Math.max(el.w, 300);
+    p.w = s === 'pdf417' ? Math.max(el.w, def.w) : w;
+    p.h = d2 ? (p.w / def.w) * def.h : 130;
+  }
+  return p;
+}
+
 export function makeBarcode(doc: LabelDoc, symbology: Symbology = 'code128', value?: string): BarcodeEl {
   const sample = SYMBOLOGIES.find((s) => s.id === symbology)?.sample ?? '12345';
   const twoD = is2D(symbology);
+  const size = barcodeDefaultSize(symbology);
   return place(doc, {
     id: uid(),
     type: 'barcode',
     x: 0,
     y: 0,
-    w: twoD ? 140 : 380,
-    h: twoD ? 140 : 130,
+    w: size.w,
+    h: size.h,
     rotation: 0,
     value: value ?? sample,
     symbology,
@@ -207,6 +243,35 @@ export function makeImage(doc: LabelDoc, src: string, natW: number, natH: number
   });
 }
 
+/** 1 mm en u */
+const MM = BASE_DPI / 25.4;
+
+/**
+ * Estampille sanitaire ovale (règl. CE 853/2004) ou signe ℮ (directive 76/211/CEE).
+ * Tailles par défaut : estampille 30 × 20 mm ; ℮ 4 mm de haut (minimum légal : 3 mm).
+ */
+export function makeMark(doc: LabelDoc, kind: MarkKind, extra: Partial<MarkEl> = {}): MarkEl {
+  const health = kind === 'health';
+  return place(doc, {
+    id: uid(),
+    type: 'mark',
+    kind,
+    x: 0,
+    y: 0,
+    w: Math.round((health ? 30 : 4) * MM),
+    h: Math.round((health ? 20 : 4) * MM),
+    rotation: 0,
+    country: health ? 'FR' : '',
+    approval: health ? '75.056.001' : '',
+    suffix: health ? 'CE' : '',
+    color: '#000000',
+    strokeWidth: health ? 3 : 0,
+    fontFamily: 'Arial',
+    ...(health ? { role: 'healthMark' as const } : {}),
+    ...extra,
+  });
+}
+
 export const TYPE_LABELS: Record<string, string> = {
   text: 'Texte',
   barcode: 'Code-barres',
@@ -214,6 +279,7 @@ export const TYPE_LABELS: Record<string, string> = {
   image: 'Image',
   shape: 'Forme',
   table: 'Tableau',
+  mark: 'Marque réglementaire',
 };
 
 export function elementLabel(el: LabelElement): string {
@@ -227,6 +293,8 @@ export function elementLabel(el: LabelElement): string {
       return 'QR ' + (el.qrType === 'wifi' ? 'Wi-Fi' : el.qrType === 'vcard' ? 'vCard' : el.value).slice(0, 24);
     case 'shape':
       return t(shapeDef(el.kind)?.label ?? 'Forme');
+    case 'mark':
+      return el.kind === 'estimated' ? t('Signe ℮') : `${t('Estampille')} ${[el.country, el.approval, el.suffix].filter(Boolean).join(' ')}`.slice(0, 28);
     default:
       return t(TYPE_LABELS[el.type]);
   }

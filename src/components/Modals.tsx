@@ -10,13 +10,15 @@ import { testPrint, sheetPages } from '../export';
 import { startJob, listHistory, clearHistory, deleteHistory, reprint, historyDocForEditing, JOB_LABELS, MAX_HISTORY, type HistoryEntry } from '../jobs';
 import * as zebra from '../zebra';
 import { SHEETS, sheetById, sizeLabel } from '../sizes';
-import { SYMBOLOGIES, encodeBarcode, encodeQr } from '../render/codes';
-import { renderLabel } from '../render/draw';
+import { SYMBOLOGIES, encodeBarcode, encodeQr, is2D } from '../render/codes';
+import { renderLabel, incoPrintSummary } from '../render/draw';
 import { makeBarcode, makeQr, newDoc } from '../elements';
 import { canvasToBlob, downloadBlob, copyText } from '../util';
 import { promptFields } from '../render/resolve';
 import { encodeBase64Url, listAutoPrint, revokeAutoPrint } from '../remote';
 import { BASE_DPI } from '../types';
+import { validatePrompts, type PromptError, type PromptSpec } from '../prompts';
+import { openSideDialog, useFoodReport } from './SideDialogs';
 
 const closeModal = () => useStore.getState().set('modal', null);
 
@@ -107,12 +109,51 @@ export function SavedLabels() {
 }
 
 // ---------- Saisie à l'impression ({{?Nom}}) ----------
+/**
+ * Fenêtre de saisie des champs {{?Nom}} : un contrôle par type de champ (liste, GTIN,
+ * nombre borné, texte), champs obligatoires marqués « * ». Mode douchette : Entrée passe
+ * au champ suivant et valide sur le dernier. La validation est bloquée tant qu'une valeur
+ * est refusée (message sous le champ, focus sur le premier champ en erreur).
+ */
 export function PromptDialog() {
   const ask = useStore((s) => s.promptAsk);
   const [vals, setVals] = useState<Record<string, string>>(ask?.values ?? {});
-  useEffect(() => setVals(ask?.values ?? {}), [ask]);
+  const [errs, setErrs] = useState<Record<string, PromptError>>({});
+  const refs = useRef<(HTMLInputElement | HTMLSelectElement | null)[]>([]);
+  useEffect(() => {
+    setVals(ask?.values ?? {});
+    setErrs({});
+  }, [ask]);
   if (!ask) return null;
-  const ok = () => ask.resolve(vals);
+  const specs: PromptSpec[] = ask.fields.map((f) => ask.specs?.find((s) => s.name === f) ?? { name: f, type: 'text', required: false });
+  const ok = () => {
+    const e = validatePrompts(specs, vals);
+    setErrs(e);
+    const first = specs.findIndex((s) => e[s.name]);
+    if (first >= 0) {
+      refs.current[first]?.focus();
+      return;
+    }
+    ask.resolve(vals);
+  };
+  const set = (name: string, v: string) => {
+    setVals({ ...vals, [name]: v });
+    if (errs[name]) {
+      const n = { ...errs };
+      delete n[name];
+      setErrs(n);
+    }
+  };
+  const onKey = (i: number) => (e: React.KeyboardEvent) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') ask.resolve(null);
+    else if (e.key === 'Enter') {
+      // douchette : le lecteur envoie Entrée après chaque code
+      e.preventDefault();
+      if (i < specs.length - 1) refs.current[i + 1]?.focus();
+      else ok();
+    }
+  };
   return (
     <Modal
       title={t('Valeurs à saisir pour cette impression')}
@@ -130,28 +171,76 @@ export function PromptDialog() {
       }
     >
       <div className="hint">{t('Ces valeurs s’appliquent à toutes les étiquettes de ce travail. Les dernières valeurs sont mémorisées pour cette étiquette.')}</div>
+      {specs.some((s) => s.required) && <div className="hint">{t('* champ obligatoire')}</div>}
       <form
         onSubmit={(e) => {
           e.preventDefault();
           ok();
         }}
+        noValidate
       >
-        {ask.fields.map((f, i) => (
-          <label key={f} className="f" style={{ marginBottom: 8 }}>
-            {f}
-            <input
-              className="inp"
-              autoFocus={i === 0}
-              value={vals[f] ?? ''}
-              onChange={(e) => setVals({ ...vals, [f]: e.target.value })}
-              onKeyDown={(e) => {
-                e.stopPropagation();
-                if (e.key === 'Escape') ask.resolve(null);
-              }}
-              aria-label={f}
-            />
-          </label>
-        ))}
+        {specs.map((sp, i) => {
+          const f = sp.name;
+          const err = errs[f];
+          const errId = `prompt-err-${i}`;
+          const common = {
+            className: 'inp' + (err ? ' bad' : ''),
+            autoFocus: i === 0,
+            onKeyDown: onKey(i),
+            'aria-label': f,
+            'aria-required': sp.required || undefined,
+            'aria-invalid': err ? true : undefined,
+            'aria-describedby': err ? errId : undefined,
+          };
+          return (
+            <label key={f} className="f" style={{ marginBottom: 8 }}>
+              <span>
+                {f}
+                {sp.required && <span style={{ color: '#e53e3e' }}> *</span>}
+                {sp.type === 'gtin' && <span className="k" style={{ color: 'var(--ink-3)', fontSize: 12 }}> · GTIN</span>}
+                {sp.type === 'number' && (sp.min != null || sp.max != null) && (
+                  <span style={{ color: 'var(--ink-3)', fontSize: 12 }}>
+                    {' · '}
+                    {sp.min != null && sp.max != null
+                      ? t('entre {a} et {b}', { a: String(sp.min).replace('.', ','), b: String(sp.max).replace('.', ',') })
+                      : sp.min != null
+                        ? t('minimum {a}', { a: String(sp.min).replace('.', ',') })
+                        : t('maximum {b}', { b: String(sp.max).replace('.', ',') })}
+                  </span>
+                )}
+              </span>
+              {sp.type === 'list' && sp.choices?.length ? (
+                <select {...common} ref={(el) => void (refs.current[i] = el)} value={vals[f] ?? ''} onChange={(e) => set(f, e.target.value)}>
+                  <option value="">{t('— Choisir —')}</option>
+                  {/* valeur mémorisée hors liste : affichée pour être corrigée */}
+                  {vals[f] && !sp.choices.includes(vals[f]) && <option value={vals[f]}>{vals[f]}</option>}
+                  {sp.choices.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              ) : sp.type === 'number' ? (
+                <input {...common} ref={(el) => void (refs.current[i] = el)} type="number" inputMode="decimal" step="any" min={sp.min} max={sp.max} value={vals[f] ?? ''} onChange={(e) => set(f, e.target.value)} />
+              ) : (
+                <input
+                  {...common}
+                  ref={(el) => void (refs.current[i] = el)}
+                  inputMode={sp.type === 'gtin' ? 'numeric' : undefined}
+                  autoComplete="off"
+                  maxLength={sp.type === 'gtin' ? 14 : undefined}
+                  value={vals[f] ?? ''}
+                  onChange={(e) => set(f, e.target.value)}
+                />
+              )}
+              {err && (
+                <div className="err" id={errId} role="alert">
+                  {t(err.msg, err.vars)}
+                </div>
+              )}
+            </label>
+          );
+        })}
         <button type="submit" style={{ display: 'none' }} />
       </form>
     </Modal>
@@ -283,6 +372,8 @@ export function HelpModal() {
     ['Suppr', 'Supprimer la sélection'],
     ['Flèches', 'Déplacer de 1 point (Maj : 10 points)'],
     ['Ctrl + molette', 'Zoomer'],
+    ['Ctrl+= / Ctrl+-', 'Zoom avant / arrière'],
+    ['Ctrl+0', 'Ajuster à la fenêtre'],
     ['Molette', 'Faire défiler'],
     ['Maj + clic', 'Ajouter / retirer de la sélection'],
     ['Alt + clic', 'Sélectionner un élément dans un groupe'],
@@ -449,6 +540,11 @@ export function PrintDialog() {
   const hasBatch = jobs.length > 1 || !!doc.data?.rows.length;
   const printer = st.printer;
   const sheet = sheetById(doc.sheet?.id);
+  // mentions obligatoires INCO trop petites sur les étiquettes du lot
+  const inco = useMemo(() => incoPrintSummary(doc, jobs), [doc, st.previewRow]); // eslint-disable-line react-hooks/exhaustive-deps
+  // mentions alimentaires (rôles attribués) : avertissement, sans bloquer
+  const food = useFoodReport();
+  const foodIssues = food.missing.length + food.dateIssues.length;
 
   const run = async (onlyCurrent: boolean) => {
     setBusy(true);
@@ -490,6 +586,22 @@ export function PrintDialog() {
               })}
         </div>
       )}
+      {inco.labels > 0 && (
+        <div className="err" style={{ marginTop: 8 }}>
+          <AlertTriangle size={14} style={{ verticalAlign: -2 }} />{' '}
+          {t('Mention obligatoire (INCO) sous la hauteur de x minimale sur {n} étiquette(s) du lot ({e} texte(s) concerné(s)). Voir le panneau de propriétés.', { n: inco.labels, e: inco.elements })}
+        </div>
+      )}
+      {food.used && foodIssues > 0 && (
+        <div className="err" style={{ marginTop: 8 }}>
+          <AlertTriangle size={14} style={{ verticalAlign: -2 }} />{' '}
+          {food.missing.length > 0 && t('Étiquetage alimentaire : mention(s) obligatoire(s) absente(s) : {l}.', { l: food.missing.map((m) => t(m.label)).join(', ') })}{' '}
+          {food.dateIssues.length > 0 && t('Date limite de consommation sans le jour.')}{' '}
+          <button className="btn sm flat" onClick={() => openSideDialog('food')}>
+            {t('Vérifier…')}
+          </button>
+        </div>
+      )}
       <div className="sec">
         <div className="sec-t">{t('Cette étiquette')}</div>
         <div className="row">
@@ -524,6 +636,9 @@ export function PrintDialog() {
           </button>
           <button className="btn sm flat" onClick={() => st.set('modal', 'export')}>
             <FileDown size={14} /> {t('PDF…')}
+          </button>
+          <button className="btn sm flat" onClick={() => openSideDialog('food')}>
+            <CheckCircle2 size={14} /> {t('Conformité alimentaire…')}
           </button>
         </div>
       </div>
@@ -898,13 +1013,13 @@ export function BarcodeTool() {
   const [text, setText] = useState(true);
   const enc = encodeBarcode(val, sym);
   const doc = useMemo(() => {
-    const d = newDoc({ widthIn: 3, heightIn: sym === 'datamatrix' ? 3 : 1.5, dpi: 300 });
+    const d = newDoc({ widthIn: 3, heightIn: is2D(sym) ? 3 : 1.5, dpi: 300 });
     const b = makeBarcode(d, sym, val);
     b.x = 20;
     b.y = 20;
     b.w = d.widthIn * BASE_DPI - 40;
     b.h = d.heightIn * BASE_DPI - 40;
-    b.showText = text && sym !== 'datamatrix';
+    b.showText = text && !is2D(sym);
     d.elements = [b];
     return d;
   }, [sym, val, text]);

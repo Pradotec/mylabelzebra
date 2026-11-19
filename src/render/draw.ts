@@ -1,9 +1,26 @@
-import { BASE_DPI, type LabelDoc, type LabelElement, type TextEl, type TableEl } from '../types';
+import { BASE_DPI, type LabelDoc, type LabelElement, type TextEl, type TableEl, type BarcodeEl, type MarkEl } from '../types';
 import { encodeBarcode, encodeQr, qrPayload, type MatrixCode } from './codes';
 import { getImage } from './images';
-import { resolveText, isPrinted, type ResolveCtx } from './resolve';
+import { resolveText, isPrinted, batchJobs, type ResolveCtx } from './resolve';
 import { shapeDef, drawSymbol } from './shapes';
-import { fontString, layoutText, hasFixedHeight, textOffsetY, justifyWords, richSegments } from './textLayout';
+import { fontString, layoutText, hasFixedHeight, textOffsetY, justifyWords, richSegments, xHeightMm, measure } from './textLayout';
+import { removeEmptyFieldLines, computeFlow } from './flow';
+import { estimatedSignPaths, healthMarkGeometry, healthMarkLines, fitOvalText, markFont } from './marks';
+import { INCO_ROLES } from './foodRoles';
+
+/**
+ * Texte résolu d'un élément texte pour une ligne de données ; option « supprimer les
+ * lignes vides » : les lignes du modèle dont tous les champs sont vides disparaissent.
+ */
+export function elText(el: TextEl, rctx: ResolveCtx): string {
+  if (rctx.resolve && el.removeEmptyLines) return resolveText(removeEmptyFieldLines(el.text, (l) => resolveText(l, rctx)), rctx);
+  return resolveText(el.text, rctx);
+}
+
+/** Mention soumise au contrôle de hauteur de x : case cochée ou rôle de l'art. 9 §1 */
+export function isIncoMandatory(el: LabelElement): el is TextEl {
+  return el.type === 'text' && (!!el.incoMandatory || (!!el.role && INCO_ROLES.has(el.role)));
+}
 
 export interface DrawCtx extends ResolveCtx {
   /** pixels de sortie par unité u */
@@ -75,7 +92,7 @@ export function paint(c: CanvasRenderingContext2D, color: string, mono?: boolean
 /** Codes-barres et QR : jamais tramés (illisibles sinon) → noir ou blanc pur. */
 const inkColor = (color: string, mono?: boolean) => (mono && !isNone(color) ? (luminance(col(color)) >= 225 ? '#ffffff' : '#000000') : col(color));
 
-export { fontString, layoutText, hasFixedHeight, textPad, fitMode, measure as measureTextWidth } from './textLayout';
+export { fontString, layoutText, hasFixedHeight, textPad, fitMode, measure as measureTextWidth, xHeightMm, xHeightRatio } from './textLayout';
 export type { TextLayout } from './textLayout';
 
 function quoteFamily(f: string) {
@@ -84,7 +101,7 @@ function quoteFamily(f: string) {
 
 /** Hauteur effective d'un élément (le texte libre a une hauteur automatique). */
 export function elementHeight(el: LabelElement, rctx: ResolveCtx): number {
-  if (el.type === 'text' && !hasFixedHeight(el)) return layoutText(el, resolveText(el.text, rctx), rctx.doc.allergensExtra).h;
+  if (el.type === 'text' && !hasFixedHeight(el)) return layoutText(el, elText(el, rctx), rctx.doc.allergensExtra).h;
   return el.h;
 }
 
@@ -221,7 +238,87 @@ export function drawElement(c: CanvasRenderingContext2D, el: LabelElement, rctx:
     }
     case 'table':
       return drawTable(c, el, rctx);
+    case 'mark':
+      return drawMark(c, el, rctx);
   }
+}
+
+const signPaths = new Map<string, Path2D>();
+function signPath(d: string) {
+  let p = signPaths.get(d);
+  if (!p) signPaths.set(d, (p = new Path2D(d)));
+  return p;
+}
+
+/** Texte de l'estampille ajusté à l'ovale (taille de police et position des lignes) */
+export function healthMarkLayout(el: MarkEl, rctx: ResolveCtx) {
+  const g = healthMarkGeometry(el.w, el.h, el.strokeWidth);
+  const lines = healthMarkLines(el, resolveText(el.approval, rctx));
+  const fit = fitOvalText(lines, (s, fs) => measure(s, markFont(el, fs)), g.a, g.b);
+  return { g, lines, fit };
+}
+
+function drawMark(c: CanvasRenderingContext2D, el: MarkEl, rctx: DrawCtx) {
+  c.fillStyle = inkColor(el.color, rctx.mono);
+  if (el.kind === 'estimated') {
+    const side = Math.min(el.w, el.h);
+    c.save();
+    c.translate((el.w - side) / 2, (el.h - side) / 2);
+    c.scale(side / 100, side / 100);
+    for (const d of estimatedSignPaths()) c.fill(signPath(d));
+    c.restore();
+    return;
+  }
+  const { g, lines, fit } = healthMarkLayout(el, rctx);
+  if (g.sw > 0) {
+    c.strokeStyle = inkColor(el.color, rctx.mono);
+    c.lineWidth = g.sw;
+    c.beginPath();
+    c.ellipse(g.cx, g.cy, g.rx, g.ry, 0, 0, Math.PI * 2);
+    c.stroke();
+  }
+  if (!lines.length || fit.fontSize <= 0) {
+    if (!lines.length && rctx.screen) errorBox(c, el.w, el.h, '?', true);
+    return;
+  }
+  c.font = markFont(el, fit.fontSize);
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  lines.forEach((l, i) => c.fillText(l, g.cx, g.cy + fit.ys[i]));
+}
+
+/** Contenu vide pour cette ligne (l'élément ancré en dessous remonte) */
+export function isEmptyFor(el: LabelElement, rctx: ResolveCtx): boolean {
+  switch (el.type) {
+    case 'text':
+      return !elText(el, rctx).trim();
+    case 'barcode':
+      return !resolveText(el.value, rctx).trim();
+    case 'qr':
+      return !resolveText(qrPayload(el), rctx).trim();
+    case 'mark':
+      return el.kind === 'health' && !healthMarkLines(el, resolveText(el.approval, rctx)).length;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Éléments imprimés pour une ligne, dans l'ordre, avec les ancres verticales appliquées
+ * (positionnement relatif). Les éléments déplacés sont des copies ; les autres sont les
+ * objets d'origine. Sans résolution des champs (modèle), aucune ancre n'est appliquée.
+ */
+export function flowElements(doc: LabelDoc, rctx: ResolveCtx): LabelElement[] {
+  const printed = doc.elements.filter((e) => isPrinted(e, rctx));
+  if (!rctx.resolve || !doc.elements.some((e) => e.anchorTo)) return printed;
+  const design: ResolveCtx = { ...rctx, resolve: false };
+  const items = doc.elements.map((e) => {
+    const p = isPrinted(e, rctx);
+    return { id: e.id, y: e.y, anchorTo: e.anchorTo, printed: p, empty: p && isEmptyFor(e, rctx), h: p ? elementHeight(e, rctx) : 0, designH: elementHeight(e, design) };
+  });
+  const ys = computeFlow(items);
+  if (!ys.size) return printed;
+  return printed.map((e) => (ys.has(e.id) ? ({ ...e, y: ys.get(e.id)! } as LabelElement) : e));
 }
 
 /** Applique miroir puis dessine. */
@@ -236,7 +333,7 @@ export function drawElementFull(c: CanvasRenderingContext2D, el: LabelElement, r
 }
 
 function drawText(c: CanvasRenderingContext2D, el: TextEl, rctx: DrawCtx) {
-  const text = resolveText(el.text, rctx);
+  const text = elText(el, rctx);
   const L = layoutText(el, text, rctx.doc.allergensExtra);
   const fg = el.invert ? (isDark(el.color) ? '#ffffff' : '#000000') : el.color;
   if (el.invert) {
@@ -469,6 +566,12 @@ export interface RenderLabelOpts {
   noBackground?: boolean;
   /** taille de sortie exacte en pixels (prioritaire sur scale) */
   pixelSize?: { W: number; H: number };
+  /**
+   * ne produire que cette zone (pixels de sortie) de l'étiquette : le canvas a la taille
+   * de la zone, son coin haut-gauche correspond au pixel (x, y). Avec x et y multiples de 8,
+   * les trames de gris gardent la même phase : pixels identiques au rendu complet.
+   */
+  region?: { x: number; y: number; w: number; h: number };
 }
 
 export function renderLabel(doc: LabelDoc, opts: RenderLabelOpts = {}) {
@@ -477,13 +580,16 @@ export function renderLabel(doc: LabelDoc, opts: RenderLabelOpts = {}) {
   const ph = opts.pixelSize?.H ?? Math.max(1, Math.round(H * (opts.scale ?? doc.dpi / BASE_DPI)));
   const sx = pw / W;
   const sy = ph / H;
+  const rg = opts.region;
+  const cw = rg ? Math.max(1, rg.w) : pw;
+  const ch = rg ? Math.max(1, rg.h) : ph;
   const cv = document.createElement('canvas');
-  cv.width = pw;
-  cv.height = ph;
+  cv.width = cw;
+  cv.height = ch;
   const c = cv.getContext('2d', { willReadFrequently: !!opts.mono })!;
   if (!opts.transparent) {
     c.fillStyle = opts.noBackground ? '#ffffff' : paint(c, doc.background || '#ffffff', opts.mono);
-    c.fillRect(0, 0, pw, ph);
+    c.fillRect(0, 0, cw, ch);
   }
   const index = opts.index ?? 0;
   const rctx: DrawCtx = {
@@ -494,10 +600,10 @@ export function renderLabel(doc: LabelDoc, opts: RenderLabelOpts = {}) {
     scale: sx,
     mono: opts.mono,
   };
-  for (const el of doc.elements) {
-    if (!isPrinted(el, rctx)) continue;
+  for (const el of flowElements(doc, rctx)) {
     if (opts.only && !opts.only(el)) continue;
     c.save();
+    if (rg) c.translate(-rg.x, -rg.y);
     c.scale(sx, sy);
     c.translate(el.x, el.y);
     if (el.rotation) c.rotate((el.rotation * Math.PI) / 180);
@@ -506,6 +612,122 @@ export function renderLabel(doc: LabelDoc, opts: RenderLabelOpts = {}) {
   }
   if (opts.mono) thresholdCanvas(cv, 128);
   return cv;
+}
+
+/** Boîte englobante (u) d'un élément pivoté autour de son coin haut-gauche (comme renderLabel). */
+export function elementBounds(el: LabelElement, h: number) {
+  if (!el.rotation) return { x: el.x, y: el.y, w: el.w, h };
+  const a = (el.rotation * Math.PI) / 180;
+  const cos = Math.cos(a),
+    sin = Math.sin(a);
+  const pts = [
+    [0, 0],
+    [el.w, 0],
+    [el.w, h],
+    [0, h],
+  ].map(([px, py]) => [el.x + px * cos - py * sin, el.y + px * sin + py * cos]);
+  const xs = pts.map((p) => p[0]),
+    ys = pts.map((p) => p[1]);
+  const x = Math.min(...xs),
+    y = Math.min(...ys);
+  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+}
+
+// ---------------------------------------------------------------------------
+// Codes logistiques GS1 (SSCC-18, GS1-128, ITF-14) : GS1 General Specifications,
+// table de spécification des symboles pour les unités logistiques en distribution
+// générale — X ≥ 0,495 mm, hauteur des barres ≥ 31,75 mm.
+// ---------------------------------------------------------------------------
+
+export const GS1_LOGISTICS_MIN_X_MM = 0.495;
+export const GS1_LOGISTICS_MIN_H_MM = 31.75;
+
+/** Le code relève-t-il des règles logistiques GS1 ? (ITF : seulement l'ITF-14) */
+export function isGs1Logistics(el: BarcodeEl, value: string): boolean {
+  if (el.symbology === 'sscc18' || el.symbology === 'gs1-128') return true;
+  return el.symbology === 'interleaved2of5' && /^\d{14}$/.test(value.trim());
+}
+
+/** Module X et hauteur des barres réellement imprimés (mm), et dépassements des minima GS1 */
+export function gs1LogisticsCheck(el: BarcodeEl, rctx: ResolveCtx): { xMm: number; barMm: number; lowX: boolean; lowH: boolean } | null {
+  const value = resolveText(el.value, rctx);
+  if (!isGs1Logistics(el, value)) return null;
+  const enc = encodeBarcode(value, el.symbology);
+  if (enc.error !== undefined || enc.kind !== 'linear') return null;
+  const ds = dpiScale(rctx.doc);
+  const g = linearGeometry(el.w, enc.modules, ds);
+  const dpi = rctx.doc.dpi || BASE_DPI;
+  const xMm = (g.mDots / dpi) * 25.4;
+  const barU = Math.max(4, el.h - (el.showText ? el.fontSize * 1.15 : 0));
+  const barMm = (barU / BASE_DPI) * 25.4;
+  return { xMm, barMm, lowX: xMm < GS1_LOGISTICS_MIN_X_MM - 1e-9, lowH: barMm < GS1_LOGISTICS_MIN_H_MM - 1e-9 };
+}
+
+// ---------------------------------------------------------------------------
+// Contrôle INCO (règlement UE 1169/2011, art. 13 §2-3 et annexe IV) : hauteur de x
+// minimale des mentions obligatoires — 1,2 mm, ou 0,9 mm si la plus grande face de
+// l'emballage mesure moins de 80 cm².
+// ---------------------------------------------------------------------------
+
+export const INCO_SMALL_FACE_CM2 = 80;
+/** Seuil de hauteur de x (mm) applicable à ce texte */
+export function incoThresholdMm(el: TextEl): number {
+  return el.incoFaceCm2 !== undefined && el.incoFaceCm2 > 0 && el.incoFaceCm2 < INCO_SMALL_FACE_CM2 ? 0.9 : 1.2;
+}
+
+/** Index des étiquettes à contrôler : toutes les lignes de données, sinon la série, sinon l'étiquette seule */
+export function incoIndices(doc: LabelDoc, max = 5000): number[] {
+  const n = doc.data?.rows.length;
+  if (n) return Array.from({ length: Math.min(n, max) }, (_, i) => i);
+  return batchJobs(doc).map((j) => j.index).slice(0, max);
+}
+
+export interface IncoReport {
+  thresholdMm: number;
+  /** plus petite hauteur de x imprimée (mm) parmi les étiquettes contrôlées */
+  minMm: number;
+  /** index (0…) des lignes / étiquettes sous le seuil */
+  failing: number[];
+  /** hauteur de x par index contrôlé */
+  byIndex: Map<number, number>;
+}
+
+/**
+ * Hauteur de x RÉELLEMENT imprimée pour chaque ligne : on reprend la mise en page
+ * résolue (taille finale après réduction automatique) de layoutText.
+ */
+export function incoCheck(el: TextEl, doc: LabelDoc, indices = incoIndices(doc)): IncoReport {
+  const thresholdMm = incoThresholdMm(el);
+  const byIndex = new Map<number, number>();
+  const failing: number[] = [];
+  let minMm = Infinity;
+  for (const index of indices) {
+    const ctx: ResolveCtx = { doc, index, row: doc.data?.rows[index], resolve: true };
+    if (!isPrinted(el, ctx)) continue;
+    const text = elText(el, ctx);
+    if (!text.trim()) continue;
+    const L = layoutText(el, text, doc.allergensExtra);
+    const mm = xHeightMm(el, L.fontSize);
+    byIndex.set(index, mm);
+    minMm = Math.min(minMm, mm);
+    if (mm < thresholdMm - 1e-9) failing.push(index);
+  }
+  return { thresholdMm, minMm, failing, byIndex };
+}
+
+/** Nombre d'étiquettes imprimées (copies comprises) dont au moins une mention INCO est sous le seuil */
+export function incoPrintSummary(doc: LabelDoc, jobs: { index: number; copies: number }[]): { labels: number; elements: number } {
+  const els = doc.elements.filter((e): e is TextEl => isIncoMandatory(e) && !e.hidden);
+  if (!els.length) return { labels: 0, elements: 0 };
+  const idx = jobs.map((j) => j.index);
+  const bad = new Set<number>();
+  let elements = 0;
+  for (const el of els) {
+    const r = incoCheck(el, doc, idx);
+    if (r.failing.length) elements++;
+    r.failing.forEach((i) => bad.add(i));
+  }
+  return { labels: jobs.filter((j) => bad.has(j.index)).reduce((a, j) => a + j.copies, 0), elements };
 }
 
 export function thresholdCanvas(cv: HTMLCanvasElement, t: number) {
@@ -520,4 +742,65 @@ export function thresholdCanvas(cv: HTMLCanvasElement, t: number) {
     a[i + 3] = 255;
   }
   c.putImageData(d, 0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Rouleau à plusieurs étiquettes de front
+// ---------------------------------------------------------------------------
+
+/** Nombre d'étiquettes de front (1 à 3) */
+export function rollColumns(doc: LabelDoc): number {
+  const n = Math.floor(Number(doc.roll?.columns) || 1);
+  return Math.max(1, Math.min(3, n));
+}
+
+/** Géométrie du rouleau en u : décalage x de chaque colonne et largeur totale du support */
+export function rollGeometryU(doc: LabelDoc) {
+  const { W, H } = labelSizeU(doc);
+  const cols = rollColumns(doc);
+  const mm = (v: number) => Math.max(0, ((Number(v) || 0) / 25.4) * BASE_DPI);
+  const gap = cols > 1 ? mm(doc.roll?.gapMm ?? 0) : 0;
+  const left = cols > 1 ? mm(doc.roll?.leftMm ?? 0) : 0;
+  const offsets = Array.from({ length: cols }, (_, k) => left + k * (W + gap));
+  return { W, H, cols, gap, left, offsets, totalW: left + cols * W + (cols - 1) * gap };
+}
+
+/**
+ * Répartition des étiquettes physiques (copies développées, dans l'ordre du travail)
+ * en rangées de « cols » étiquettes ; la dernière rangée peut être incomplète.
+ * Les rangées identiques consécutives sont regroupées (nombre de passages).
+ */
+export function rollRows(jobs: { index: number; copies: number }[], cols: number): { slots: number[]; count: number }[] {
+  const flat: number[] = [];
+  for (const j of jobs) for (let c = 0; c < Math.max(0, j.copies); c++) flat.push(j.index);
+  const rows: { slots: number[]; count: number }[] = [];
+  for (let i = 0; i < flat.length; i += cols) {
+    const slots = flat.slice(i, i + cols);
+    const last = rows[rows.length - 1];
+    if (last && last.slots.length === slots.length && last.slots.every((v, k) => v === slots[k])) last.count++;
+    else rows.push({ slots, count: 1 });
+  }
+  return rows;
+}
+
+/**
+ * Rangée du rouleau en image : les étiquettes « slots » côte à côte (marge gauche et écarts
+ * en blanc), même rendu que renderLabel pour chacune. Une rangée incomplète laisse les
+ * colonnes restantes vierges.
+ */
+export function renderRollRow(doc: LabelDoc, slots: number[], opts: { scale: number; mono?: boolean }) {
+  const geo = rollGeometryU(doc);
+  const s = opts.scale;
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(geo.totalW * s));
+  cv.height = Math.max(1, Math.round(geo.H * s));
+  const c = cv.getContext('2d')!;
+  c.fillStyle = '#ffffff';
+  c.fillRect(0, 0, cv.width, cv.height);
+  slots.forEach((index, k) => {
+    const lab = renderLabel(doc, { index, scale: s, mono: opts.mono });
+    c.drawImage(lab, Math.round(geo.offsets[k] * s), 0);
+    lab.width = lab.height = 0;
+  });
+  return cv;
 }

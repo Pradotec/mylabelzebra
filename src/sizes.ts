@@ -8,7 +8,7 @@ export interface SizePreset {
 /** Rouleaux thermiques courants (pouces, largeur × hauteur) */
 export const ROLL_PRESETS: SizePreset[] = [
   [1, 1], [1, 2], [1, 3], [1.5, 1], [2, 1], [2, 2], [2, 3], [2, 4], [2.5, 1], [2.83, 2], [2.83, 4], [3, 1], [3, 2], [3, 3],
-  [4, 1], [4, 1.5], [4, 2], [4, 3], [4, 4], [4, 6], [5, 1], [5, 2], [6, 2], [6, 4],
+  [4, 1], [4, 1.5], [4, 2], [4, 3], [4, 4], [4, 6], [4, 8], [5, 1], [5, 2], [6, 2], [6, 4],
 ].map(([w, h]) => ({ w, h }));
 
 const mm = (v: number) => Math.round((v / 25.4) * 1000) / 1000;
@@ -64,6 +64,18 @@ export const BRAND_PRESETS: BrandGroup[] = [
       { w: mm(54), h: mm(17), label: 'DK-11204 Multi-usage 17×54 mm' },
       { w: mm(90), h: mm(38), label: 'DK-11208 Grande adresse 38×90 mm' },
       { w: mm(24), h: mm(24), label: 'DK-11218 Rond 24 mm', round: true },
+    ],
+  },
+  {
+    // formats palette / logistique (étiquettes GS1 transport : A6, A5, 4×6, 4×8…)
+    brand: 'Logistique',
+    sizes: [
+      { w: mm(105), h: mm(148), label: 'A6 105×148 mm (palette SSCC)' },
+      { w: mm(148), h: mm(210), label: 'A5 148×210 mm' },
+      { w: 4, h: 6, label: '4×6" (101,6×152,4 mm)' },
+      { w: 4, h: 8, label: '4×8" (101,6×203,2 mm)' },
+      { w: mm(100), h: mm(150), label: '100×150 mm' },
+      { w: mm(100), h: mm(210), label: '100×210 mm' },
     ],
   },
   {

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Eye, EyeOff, Contrast, Minus, Plus, ChevronLeft, ChevronRight, Type, Barcode, QrCode, Database, MoreHorizontal, Shapes, Image as ImageIcon, Layers, LayoutTemplate, Hash, CalendarDays, ScanLine, Table2, BoxSelect, Copy } from 'lucide-react';
-import { useStore } from './store';
+import { useStore, lastCopiedSystemText } from './store';
+import { isQuotaError, storageErrorMessage } from './storage';
+import { ProgressOverlay } from './components/Progress';
 import { TopBar } from './components/TopBar';
 import { SetupBar } from './components/SetupBar';
 import { LeftBar } from './components/LeftBar';
@@ -9,6 +11,8 @@ import { Editor } from './components/Editor';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { ZplViewer } from './components/ZplViewer';
 import { SavedLabels, HelpModal, PrintDialog, ExportDialog, ZebraPanel, SheetsDialog, BarcodeTool, QrTool, PromptDialog, HistoryModal } from './components/Modals';
+import { CarrierDialogHost } from './components/CarrierDialog';
+import { NutritionDialogHost } from './components/NutritionDialog';
 import { Dropdown } from './components/ui';
 import { nudge } from './components/ContextMenu';
 import { t, onLangChange } from './i18n';
@@ -91,22 +95,28 @@ function RemoteBanner() {
   const req = useStore((s) => s.remoteRequest);
   const [remember, setRemember] = useState(false);
   if (!req) return null;
+  const title = req.open ? t('Ouverture d’un modèle') : t('Demande d’impression');
   return (
-    <div className="remote-banner pill" role="alertdialog" aria-label={t('Demande d’impression')}>
+    <div className="remote-banner pill" role="alertdialog" aria-label={title}>
       <div style={{ flex: 1, minWidth: 220 }}>
-        <b>{t('Demande d’impression')}</b> — {req.source === 'url' ? t('depuis un lien') : t('depuis {o}', { o: req.source })}
+        <b>{title}</b> — {req.source === 'url' ? t('depuis un lien') : t('depuis {o}', { o: req.source })}
         <div style={{ fontSize: 13 }}>
-          {t('{n} étiquette(s) « {d} » → {p}', { n: req.count, d: req.docName, p: t(req.target) })}
+          {req.open ? t('Ouvrir « {d} » ({n} étiquette(s)) dans l’éditeur', { n: req.count, d: req.docName }) : t('{n} étiquette(s) « {d} » → {p}', { n: req.count, d: req.docName, p: t(req.target) })}
         </div>
-        <label className="check" style={{ margin: '4px 0 0', fontSize: 12.5 }}>
-          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> {t('Autoriser l’impression automatique pour ce modèle (sans confirmation)')}
-        </label>
+        {req.unsaved && (
+          <div style={{ fontSize: 12.5, color: 'var(--err)', marginTop: 2 }}>{t('L’étiquette en cours a des modifications non enregistrées : elle sera remplacée (annulable avec Ctrl+Z).')}</div>
+        )}
+        {!req.open && (
+          <label className="check" style={{ margin: '4px 0 0', fontSize: 12.5 }}>
+            <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> {t('Autoriser l’impression automatique pour ce modèle (sans confirmation)')}
+          </label>
+        )}
       </div>
       <button className="btn flat" onClick={() => (req.resolve(false, false), setRemember(false))}>
         {t('Annuler')}
       </button>
       <button className="btn accent" onClick={() => (req.resolve(true, remember), setRemember(false))}>
-        {t('Imprimer')}
+        {req.open ? t('Ouvrir') : t('Imprimer')}
       </button>
     </div>
   );
@@ -206,6 +216,16 @@ function MobileBar() {
   );
 }
 
+/** Longueur maximale d'un texte collé depuis une autre application */
+const MAX_PASTE_TEXT = 10_000;
+
+/** Cible clavier qui gère elle-même Entrée (bouton, lien, champ éditable…) */
+function isInteractiveTarget(tg: HTMLElement | null): boolean {
+  if (!tg || !tg.tagName) return false;
+  if (tg.isContentEditable) return true;
+  return !!tg.closest?.('button, a[href], a, input, textarea, select, summary, [contenteditable=""], [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [role="checkbox"], [role="tab"], [role="option"]');
+}
+
 function useShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -222,14 +242,23 @@ function useShortcuts() {
       if (mod && k === 'd') return e.preventDefault(), st.duplicateSelected();
       if (mod && k === 'a') return e.preventDefault(), st.select(st.doc.elements.filter((x) => !x.hidden).map((x) => x.id));
       if (mod && k === 'g') return e.preventDefault(), e.shiftKey ? st.ungroupSelected() : st.groupSelected();
-      if (mod && k === 's') return e.preventDefault(), saveCurrent();
+      if (mod && k === 's')
+        return (
+          e.preventDefault(),
+          void saveCurrent().catch((err) => useStore.getState().toast(storageErrorMessage(err), 'error'))
+        );
       if (mod && k === 'p') return e.preventDefault(), st.set('modal', 'print');
+      // zoom : Ctrl+0 ajuste à la fenêtre, Ctrl+= / Ctrl++ / Ctrl+- (aussi pavé numérique)
+      if (mod && !e.altKey && (k === '0' || e.code === 'Digit0' || e.code === 'Numpad0')) return e.preventDefault(), useStore.setState({ fitRequest: st.fitRequest + 1 });
+      if (mod && !e.altKey && (k === '=' || k === '+' || e.code === 'NumpadAdd' || e.code === 'Equal')) return e.preventDefault(), st.setZoom(st.zoom * 1.2);
+      if (mod && !e.altKey && (k === '-' || k === '_' || e.code === 'NumpadSubtract' || e.code === 'Minus')) return e.preventDefault(), st.setZoom(st.zoom / 1.2);
       if (k === 'delete' || k === 'backspace') return st.selected.length ? (e.preventDefault(), st.removeSelected()) : undefined;
       if (k === 'escape') {
         if (st.preview) return useStore.setState({ preview: false });
         return useStore.setState({ selected: [], leftPanel: null, rightPanel: null });
       }
-      if (k === 'enter' && st.selected.length === 1) {
+      // Entrée sur un bouton / lien focalisé : action du bouton, pas d'édition du texte sélectionné
+      if (k === 'enter' && st.selected.length === 1 && !isInteractiveTarget(tg)) {
         const el = st.doc.elements.find((x) => x.id === st.selected[0]);
         if (el?.type === 'text' && !el.locked) return e.preventDefault(), useStore.setState({ editingTextId: el.id });
       }
@@ -243,7 +272,7 @@ function useShortcuts() {
     // Ctrl+V : image du presse-papiers, sinon éléments copiés
     const onPaste = (e: ClipboardEvent) => {
       const tg = e.target as HTMLElement;
-      if (tg && (tg.tagName === 'INPUT' || tg.tagName === 'TEXTAREA')) return;
+      if (tg && (tg.tagName === 'INPUT' || tg.tagName === 'TEXTAREA' || tg.isContentEditable)) return;
       if (useStore.getState().modal) return;
       const items = Array.from(e.clipboardData?.items || []);
       const img = items.find((i) => i.type.startsWith('image/'));
@@ -262,6 +291,17 @@ function useShortcuts() {
         return;
       }
       e.preventDefault();
+      // Texte plus récent que la dernière copie d'éléments (copié dans une autre application) :
+      // il devient un élément texte, au lieu de recoller d'anciens éléments.
+      const plain = txt.replace(/\r\n?/g, '\n').trim();
+      if (plain && plain !== (lastCopiedSystemText() ?? '').replace(/\r\n?/g, '\n').trim()) {
+        if (plain.length > MAX_PASTE_TEXT) {
+          useStore.getState().toast(t('Texte collé trop long ({n} caractères, {max} au maximum).', { n: plain.length, max: MAX_PASTE_TEXT }), 'error');
+          return;
+        }
+        addText(plain);
+        return;
+      }
       useStore.getState().paste();
     };
     const onDragOver = (e: DragEvent) => {
@@ -286,11 +326,20 @@ function useShortcuts() {
         else if (/\.zpl$/i.test(f.name)) useStore.getState().set('modal', 'zpl');
       }
     };
+    // Écriture refusée par le stockage (quota) non interceptée par l'appelant
+    // (ex. « Enregistrer ») : message clair plutôt qu'un échec silencieux
+    const onRejection = (e: PromiseRejectionEvent) => {
+      if (!isQuotaError(e.reason)) return;
+      e.preventDefault();
+      useStore.getState().toast(storageErrorMessage(e.reason), 'error');
+    };
+    window.addEventListener('unhandledrejection', onRejection);
     window.addEventListener('keydown', onKey);
     window.addEventListener('paste', onPaste);
     window.addEventListener('dragover', onDragOver);
     window.addEventListener('drop', onDrop);
     return () => {
+      window.removeEventListener('unhandledrejection', onRejection);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('paste', onPaste);
       window.removeEventListener('dragover', onDragOver);
@@ -337,8 +386,11 @@ export default function App() {
       {modal === 'tool-barcode' && <BarcodeTool />}
       {modal === 'tool-qr' && <QrTool />}
       {modal === 'history' && <HistoryModal />}
+      <CarrierDialogHost />
+      <NutritionDialogHost />
       <PromptDialog />
       <RemoteBanner />
+      <ProgressOverlay />
       <Toasts />
     </div>
   );

@@ -16,8 +16,16 @@ import {
   dpiScale,
   tableColumns,
   tableRows,
+  elText,
+  flowElements,
+  healthMarkLayout,
+  rollColumns,
+  rollGeometryU,
+  rollRows,
+  renderRollRow,
 } from './render/draw';
-import { batchJobs, resolveText, isPrinted, type PrintJob, type ResolveCtx } from './render/resolve';
+import { estimatedSignPaths, markFont } from './render/marks';
+import { batchJobs, resolveText, type PrintJob, type ResolveCtx } from './render/resolve';
 import { encodeBarcode, encodeQr, qrPayload, type MatrixCode } from './render/codes';
 import { preloadImages } from './render/images';
 import { shapeDef } from './render/shapes';
@@ -26,6 +34,7 @@ import { canvasToBlob, downloadBlob, downloadText, safeFileName } from './util';
 import { normalizeDoc } from './elements';
 import { sheetById, type SheetDef } from './sizes';
 import { t } from './i18n';
+import { beginProgress, type ProgressHandle } from './progress';
 
 export async function ready(doc: LabelDoc) {
   await preloadImages(doc.elements.filter((e) => e.type === 'image').map((e) => (e as { src: string }).src));
@@ -49,7 +58,9 @@ export function exportJson(doc: LabelDoc) {
 // ---------- Images ----------
 export async function labelBlob(doc: LabelDoc, index: number, dpi: number, type: 'image/png' | 'image/jpeg') {
   await ready(doc);
-  const cv = renderLabel(doc, { index, scale: dpi / BASE_DPI });
+  // rouleau à plusieurs étiquettes de front : la rangée telle qu'imprimée (étiquette répétée sur chaque colonne)
+  const cols = rollColumns(doc);
+  const cv = cols > 1 ? renderRollRow(doc, Array(cols).fill(index), { scale: dpi / BASE_DPI }) : renderLabel(doc, { index, scale: dpi / BASE_DPI });
   return canvasToBlob(cv, type, 0.95);
 }
 
@@ -64,39 +75,113 @@ async function pdfFor(w: number, h: number) {
   return new JsPDF({ unit: 'in', format: [w, h], orientation: w > h ? 'landscape' : 'portrait', compress: true });
 }
 
-async function addLabelPage(pdf: jsPDF, doc: LabelDoc, index: number, dpi: number, first: boolean) {
-  const cv = renderLabel(doc, { index, scale: Math.max(dpi, 300) / BASE_DPI });
-  if (!first) pdf.addPage([doc.widthIn, doc.heightIn], doc.widthIn > doc.heightIn ? 'landscape' : 'portrait');
-  pdf.addImage(cv.toDataURL('image/png'), 'PNG', 0, 0, doc.widthIn, doc.heightIn, undefined, 'FAST');
+/** Libère la mémoire d'un canvas dès qu'il n'est plus utile (pages volumineuses) */
+function releaseCanvas(cv: HTMLCanvasElement) {
+  cv.width = 0;
+  cv.height = 0;
 }
 
-/** PDF de la taille exacte de l'étiquette, une page par étiquette du lot */
+/** Rendu PNG (dataURL) d'une étiquette ; le canvas est libéré aussitôt */
+function labelDataUrl(doc: LabelDoc, index: number, dpi: number): string {
+  const cv = renderLabel(doc, { index, scale: Math.max(dpi, 300) / BASE_DPI });
+  const url = cv.toDataURL('image/png');
+  releaseCanvas(cv);
+  return url;
+}
+
+function addLabelImage(pdf: jsPDF, doc: LabelDoc, url: string, first: boolean) {
+  if (!first) pdf.addPage([doc.widthIn, doc.heightIn], doc.widthIn > doc.heightIn ? 'landscape' : 'portrait');
+  pdf.addImage(url, 'PNG', 0, 0, doc.widthIn, doc.heightIn, undefined, 'FAST');
+}
+
+const totalCopies = (jobs: PrintJob[]) => jobs.reduce((a, j) => a + Math.max(0, j.copies), 0);
+
+/** Pages du rouleau à plusieurs étiquettes de front : une page par rangée (largeur totale du support) */
+async function downloadRollPdf(doc: LabelDoc, jobs: PrintJob[], dpi: number) {
+  const geo = rollGeometryU(doc);
+  const wIn = geo.totalW / BASE_DPI;
+  const rows = rollRows(jobs, geo.cols);
+  const pdf = await pdfFor(wIn, doc.heightIn);
+  const p = beginProgress(t('Export PDF'), rows.reduce((a, r) => a + r.count, 0));
+  try {
+    let first = true;
+    for (const r of rows) {
+      await p.step(0);
+      const cv = renderRollRow(doc, r.slots, { scale: Math.max(dpi, 300) / BASE_DPI });
+      const url = cv.toDataURL('image/png');
+      releaseCanvas(cv);
+      for (let c = 0; c < r.count; c++) {
+        if (!first) pdf.addPage([wIn, doc.heightIn], wIn > doc.heightIn ? 'landscape' : 'portrait');
+        pdf.addImage(url, 'PNG', 0, 0, wIn, doc.heightIn, undefined, 'FAST');
+        first = false;
+        await p.step();
+      }
+    }
+    p.setLabel(t('Finalisation du PDF…'));
+    await p.step(0);
+    pdf.save(safeFileName(doc.name) + '.pdf');
+  } finally {
+    p.end();
+  }
+}
+
+/** PDF de la taille exacte de l'étiquette, une page par étiquette du lot (copies comprises) */
 export async function downloadPdf(doc: LabelDoc, jobs: PrintJob[], dpi: number) {
   await ready(doc);
+  if (rollColumns(doc) > 1) return downloadRollPdf(doc, jobs, dpi);
   const pdf = await pdfFor(doc.widthIn, doc.heightIn);
-  let first = true;
-  for (const j of jobs)
-    for (let c = 0; c < j.copies; c++) {
-      await addLabelPage(pdf, doc, j.index, dpi, first);
-      first = false;
+  const p = beginProgress(t('Export PDF'), totalCopies(jobs));
+  try {
+    let first = true;
+    for (const j of jobs) {
+      if (j.copies <= 0) continue;
+      await p.step(0);
+      // une seule image par ligne : les copies réutilisent la même image dans le PDF
+      const url = labelDataUrl(doc, j.index, dpi);
+      for (let c = 0; c < j.copies; c++) {
+        addLabelImage(pdf, doc, url, first);
+        first = false;
+        await p.step();
+      }
     }
-  pdf.save(safeFileName(doc.name) + '.pdf');
+    p.setLabel(t('Finalisation du PDF…'));
+    await p.step(0);
+    pdf.save(safeFileName(doc.name) + '.pdf');
+  } finally {
+    p.end();
+  }
 }
 
-/** Un PDF par étiquette, zippés */
+/**
+ * Un PDF par ligne du lot, zippés. Chaque PDF contient autant de pages que de copies
+ * demandées pour cette ligne : le nombre d'étiquettes produites est celui inscrit dans
+ * l'historique d'impression.
+ */
 export async function downloadPdfZip(doc: LabelDoc, jobs: PrintJob[], dpi: number) {
   await ready(doc);
   const JSZip = await loadZip();
   const zip = new JSZip();
-  let n = 0;
-  for (const j of jobs) {
-    const pdf = await pdfFor(doc.widthIn, doc.heightIn);
-    await addLabelPage(pdf, doc, j.index, dpi, true);
-    n++;
-    zip.file(`${safeFileName(doc.name)}-${String(n).padStart(3, '0')}.pdf`, pdf.output('blob'));
+  const list = jobs.filter((j) => j.copies > 0);
+  const p = beginProgress(t('Export PDF (.zip)'), list.length);
+  try {
+    let n = 0;
+    for (const j of list) {
+      await p.step(0);
+      const pdf = await pdfFor(doc.widthIn, doc.heightIn);
+      const url = labelDataUrl(doc, j.index, dpi);
+      for (let c = 0; c < j.copies; c++) addLabelImage(pdf, doc, url, c === 0);
+      n++;
+      zip.file(`${safeFileName(doc.name)}-${String(n).padStart(3, '0')}.pdf`, pdf.output('blob'));
+      await p.step();
+    }
+    p.setLabel(t('Compression…'));
+    await p.step(0);
+    const blob = await zip.generateAsync({ type: 'blob' });
+    p.check();
+    downloadBlob(blob, safeFileName(doc.name) + '-pdf.zip');
+  } finally {
+    p.end();
   }
-  const blob = await zip.generateAsync({ type: 'blob' });
-  downloadBlob(blob, safeFileName(doc.name) + '-pdf.zip');
 }
 
 // ---------- Planches (Avery) ----------
@@ -119,16 +204,37 @@ export function sheetSlots(doc: LabelDoc, sheet: SheetDef, currentRow: number): 
   return slots;
 }
 
-export async function sheetPages(doc: LabelDoc, currentRow: number, dpi = 300): Promise<HTMLCanvasElement[]> {
+/** Nombre de pages de planche pour le document */
+export function sheetPageCount(doc: LabelDoc, currentRow: number): number {
   const sheet = sheetById(doc.sheet?.id);
-  if (!sheet) return [];
+  if (!sheet) return 0;
+  return Math.ceil(sheetSlots(doc, sheet, currentRow).length / (sheet.cols * sheet.rows));
+}
+
+/** Toutes les pages de planche en mémoire (aperçu) */
+export async function sheetPages(doc: LabelDoc, currentRow: number, dpi = 300): Promise<HTMLCanvasElement[]> {
+  const pages: HTMLCanvasElement[] = [];
+  await forEachSheetPage(doc, currentRow, dpi, (cv) => void pages.push(cv));
+  return pages;
+}
+
+/**
+ * Rend les pages de planche une par une et les passe à `onPage` : seule la page en cours
+ * est en mémoire (l'appelant la libère après usage). `p` : progression / annulation.
+ */
+export async function forEachSheetPage(doc: LabelDoc, currentRow: number, dpi: number, onPage: (cv: HTMLCanvasElement, i: number) => void | Promise<void>, p?: ProgressHandle): Promise<number> {
+  const sheet = sheetById(doc.sheet?.id);
+  if (!sheet) return 0;
   await ready(doc);
   const slots = sheetSlots(doc, sheet, currentRow);
   const per = sheet.cols * sheet.rows;
-  const pages: HTMLCanvasElement[] = [];
+  // rendu de chaque étiquette distincte mis en cache, borné pour ne pas saturer la mémoire
   const cache = new Map<number, HTMLCanvasElement>();
+  const CACHE_MAX = 64;
   const only = doc.sheet?.textOnly ? (e: LabelElement) => e.type === 'text' : undefined;
-  for (let p = 0; p * per < slots.length; p++) {
+  let count = 0;
+  for (let p_ = 0; p_ * per < slots.length; p_++) {
+    if (p) await p.step(0);
     const cv = document.createElement('canvas');
     cv.width = Math.round(sheet.pageW * dpi);
     cv.height = Math.round(sheet.pageH * dpi);
@@ -136,11 +242,16 @@ export async function sheetPages(doc: LabelDoc, currentRow: number, dpi = 300): 
     c.fillStyle = '#fff';
     c.fillRect(0, 0, cv.width, cv.height);
     for (let k = 0; k < per; k++) {
-      const idx = slots[p * per + k];
+      const idx = slots[p_ * per + k];
       if (idx == null) continue;
       let img = cache.get(idx);
       if (!img) {
         img = renderLabel(doc, { index: idx, scale: dpi / BASE_DPI, only, transparent: true });
+        if (cache.size >= CACHE_MAX) {
+          const [oldKey, old] = cache.entries().next().value as [number, HTMLCanvasElement];
+          cache.delete(oldKey);
+          releaseCanvas(old);
+        }
         cache.set(idx, img);
       }
       const col_ = k % sheet.cols;
@@ -157,26 +268,42 @@ export async function sheetPages(doc: LabelDoc, currentRow: number, dpi = 300): 
       c.drawImage(img, x, y, sheet.w * dpi, sheet.h * dpi);
       c.restore();
     }
-    pages.push(cv);
+    await onPage(cv, p_);
+    count++;
+    if (p) await p.step();
   }
-  return pages;
+  cache.forEach(releaseCanvas);
+  return count;
 }
 
 export async function downloadSheetsPdf(doc: LabelDoc, currentRow: number) {
   const sheet = sheetById(doc.sheet?.id);
   if (!sheet) return;
-  const pages = await sheetPages(doc, currentRow);
   const JsPDF = await loadPdf();
   const pdf = new JsPDF({ unit: 'in', format: [sheet.pageW, sheet.pageH], orientation: 'portrait' });
-  pages.forEach((cv, i) => {
-    if (i) pdf.addPage([sheet.pageW, sheet.pageH], 'portrait');
-    pdf.addImage(cv.toDataURL('image/png'), 'PNG', 0, 0, sheet.pageW, sheet.pageH, undefined, 'FAST');
-  });
-  pdf.save(safeFileName(doc.name) + '-planches.pdf');
+  const p = beginProgress(t('Export des planches (PDF)'), sheetPageCount(doc, currentRow));
+  try {
+    await forEachSheetPage(
+      doc,
+      currentRow,
+      300,
+      (cv, i) => {
+        if (i) pdf.addPage([sheet.pageW, sheet.pageH], 'portrait');
+        pdf.addImage(cv.toDataURL('image/png'), 'PNG', 0, 0, sheet.pageW, sheet.pageH, undefined, 'FAST');
+        releaseCanvas(cv); // page ajoutée : le canvas n'est plus utile
+      },
+      p,
+    );
+    p.setLabel(t('Finalisation du PDF…'));
+    await p.step(0);
+    pdf.save(safeFileName(doc.name) + '-planches.pdf');
+  } finally {
+    p.end();
+  }
 }
 
 // ---------- Impression navigateur ----------
-function printImages(urls: string[], wIn: number, hIn: number) {
+function printImages(urls: string[], wIn: number, hIn: number, onDone?: () => void) {
   const iframe = document.createElement('iframe');
   iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
   document.body.appendChild(iframe);
@@ -196,34 +323,88 @@ function printImages(urls: string[], wIn: number, hIn: number) {
     setTimeout(() => {
       iframe.contentWindow!.focus();
       iframe.contentWindow!.print();
-      setTimeout(() => iframe.remove(), 60_000);
+      setTimeout(() => {
+        iframe.remove();
+        onDone?.();
+      }, 60_000);
     }, 50);
   });
 }
 
+/**
+ * Image PNG d'un canvas pour l'impression : URL blob (binaire, hors du tas JavaScript)
+ * plutôt qu'une dataURL base64 ; le canvas est libéré aussitôt.
+ */
+async function canvasPrintUrl(cv: HTMLCanvasElement, blobs: string[]): Promise<string> {
+  let url: string;
+  try {
+    url = URL.createObjectURL(await canvasToBlob(cv, 'image/png'));
+    blobs.push(url);
+  } catch {
+    url = cv.toDataURL('image/png');
+  }
+  releaseCanvas(cv);
+  return url;
+}
+
 export async function printOnComputer(doc: LabelDoc, jobs: PrintJob[], currentRow: number) {
   await ready(doc);
-  if (doc.sheet && sheetById(doc.sheet.id)) {
-    const sheet = sheetById(doc.sheet.id)!;
-    const pages = await sheetPages(doc, currentRow, 200);
-    printImages(
-      pages.map((p) => p.toDataURL('image/png')),
-      sheet.pageW,
-      sheet.pageH,
-    );
-    return;
-  }
-  const urls: string[] = [];
-  const cache = new Map<number, string>();
-  for (const j of jobs) {
-    let u = cache.get(j.index);
-    if (!u) {
-      u = renderLabel(doc, { index: j.index, scale: Math.max(300, doc.dpi) / BASE_DPI }).toDataURL('image/png');
-      cache.set(j.index, u);
+  const blobs: string[] = [];
+  const revoke = () => blobs.forEach((u) => URL.revokeObjectURL(u));
+  try {
+    if (doc.sheet && sheetById(doc.sheet.id)) {
+      const sheet = sheetById(doc.sheet.id)!;
+      const urls: string[] = [];
+      const p = beginProgress(t('Préparation de l’impression'), sheetPageCount(doc, currentRow));
+      try {
+        await forEachSheetPage(doc, currentRow, 200, async (cv) => void urls.push(await canvasPrintUrl(cv, blobs)), p);
+      } finally {
+        p.end();
+      }
+      printImages(urls, sheet.pageW, sheet.pageH, revoke);
+      return;
     }
-    for (let c = 0; c < j.copies; c++) urls.push(u);
+    if (rollColumns(doc) > 1) {
+      // rouleau à plusieurs étiquettes de front : une page par rangée
+      const geo = rollGeometryU(doc);
+      const rows = rollRows(jobs, geo.cols);
+      const urls: string[] = [];
+      const p = beginProgress(t('Préparation de l’impression'), rows.length);
+      try {
+        for (const r of rows) {
+          await p.step(0);
+          const u = await canvasPrintUrl(renderRollRow(doc, r.slots, { scale: Math.max(300, doc.dpi) / BASE_DPI }), blobs);
+          for (let c = 0; c < r.count; c++) urls.push(u);
+          await p.step();
+        }
+      } finally {
+        p.end();
+      }
+      printImages(urls, geo.totalW / BASE_DPI, doc.heightIn, revoke);
+      return;
+    }
+    const urls: string[] = [];
+    const cache = new Map<number, string>();
+    const p = beginProgress(t('Préparation de l’impression'), totalCopies(jobs));
+    try {
+      for (const j of jobs) {
+        await p.step(0);
+        let u = cache.get(j.index);
+        if (!u) {
+          u = await canvasPrintUrl(renderLabel(doc, { index: j.index, scale: Math.max(300, doc.dpi) / BASE_DPI }), blobs);
+          cache.set(j.index, u);
+        }
+        for (let c = 0; c < j.copies; c++) urls.push(u);
+        await p.step(Math.max(0, j.copies));
+      }
+    } finally {
+      p.end();
+    }
+    printImages(urls, doc.widthIn, doc.heightIn, revoke);
+  } catch (e) {
+    revoke();
+    throw e;
   }
-  printImages(urls, doc.widthIn, doc.heightIn);
 }
 
 /** Impression test : contours numérotés de chaque étiquette */
@@ -289,7 +470,7 @@ function elementSvg(el: LabelElement, ctx: ResolveCtx, doc: LabelDoc): string {
   switch (el.type) {
     case 'text': {
       if (el.curve && el.curve !== 'none') return '';
-      const txt = resolveText(el.text, ctx);
+      const txt = elText(el, ctx);
       const L = layoutText(el, txt, doc.allergensExtra);
       const font = fontStr(el, L.fontSize);
       const fg = el.invert ? (col(el.color).toLowerCase() === '#ffffff' ? '#000' : '#fff') : col(el.color);
@@ -376,6 +557,25 @@ function elementSvg(el: LabelElement, ctx: ResolveCtx, doc: LabelDoc): string {
       }
       return s;
     }
+    case 'mark': {
+      const fill = col(el.color);
+      if (el.kind === 'estimated') {
+        const side = Math.min(el.w, el.h);
+        const paths = estimatedSignPaths()
+          .map((d) => `<path d="${d}" fill="${fill}"/>`)
+          .join('');
+        return `<g transform="translate(${(el.w - side) / 2} ${(el.h - side) / 2}) scale(${side / 100})">${paths}</g>`;
+      }
+      const { g, lines, fit } = healthMarkLayout(el, ctx);
+      let s = g.sw > 0 ? `<ellipse cx="${g.cx}" cy="${g.cy}" rx="${g.rx}" ry="${g.ry}" fill="none" stroke="${fill}" stroke-width="${g.sw}"/>` : '';
+      if (fit.fontSize > 0) {
+        const fam = escXml(markFont(el, fit.fontSize).replace(/^bold [\d.]+px /, ''));
+        lines.forEach((l, i) => {
+          s += `<text x="${g.cx}" y="${g.cy + fit.ys[i]}" dominant-baseline="central" text-anchor="middle" font-family="${fam}" font-weight="bold" font-size="${fit.fontSize}" fill="${fill}">${escXml(l)}</text>`;
+        });
+      }
+      return s;
+    }
     default:
       return '';
   }
@@ -387,8 +587,8 @@ export async function downloadSvg(doc: LabelDoc, index: number) {
   const { W, H } = labelSizeU(doc);
   const ctx: ResolveCtx = { doc, index, row: doc.data?.rows[index], resolve: true };
   let body = `<rect width="${W}" height="${H}" fill="${escXml(doc.background || '#fff')}"/>`;
-  for (const el of doc.elements) {
-    if (!isPrinted(el, ctx)) continue;
+  // éléments imprimés pour cette ligne, ancres verticales appliquées
+  for (const el of flowElements(doc, ctx)) {
     const h = elementHeight(el, ctx);
     let inner = el.flipX || el.flipY ? '' : elementSvg(el, ctx, doc);
     let tr = `translate(${el.x} ${el.y})${el.rotation ? ` rotate(${el.rotation})` : ''}`;
