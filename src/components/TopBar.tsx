@@ -1,11 +1,11 @@
-import { Undo2, Redo2, HelpCircle, Plus, FolderOpen, Save, FileText, FileDown, FileUp, Image as ImageIcon, FileType, Copy, Download, ScanLine, ClipboardCopy, ClipboardPaste, Languages, Barcode, QrCode, Grid3x3, Printer, Check } from 'lucide-react';
+import { Undo2, Redo2, HelpCircle, Plus, FolderOpen, Save, FileText, FileDown, FileUp, Image as ImageIcon, FileType, Copy, Download, ScanLine, ClipboardCopy, ClipboardPaste, Languages, Barcode, QrCode, Grid3x3, Printer, Check, History } from 'lucide-react';
 import { useStore } from '../store';
 import { Dropdown } from './ui';
 import { t, getLang, setLang, LANGS } from '../i18n';
 import { newLabel, saveCurrent, importJsonText } from '../actions';
-import { exportJson, docToJson, downloadSvg, downloadImage } from '../export';
-import { generateBatchZpl } from '../zpl/generate';
-import { copyText, downloadText, pickFile, safeFileName } from '../util';
+import { exportJson, docToJson } from '../export';
+import { startJob } from '../jobs';
+import { copyText, pickFile } from '../util';
 
 export function Logo({ size = 30 }: { size?: number }) {
   return (
@@ -29,13 +29,8 @@ export function Logo({ size = 30 }: { size?: number }) {
 export function TopBar() {
   const st = useStore();
   const { doc } = st;
-  const row = st.previewRow;
-
-  const copyZpl = async () => {
-    const z = generateBatchZpl(doc, row);
-    if (await copyText(z)) st.toast(t('ZPL copié dans le presse-papiers'), 'ok');
-  };
-  const dlZpl = () => downloadText(generateBatchZpl(doc, row), safeFileName(doc.name) + '.zpl');
+  const copyZpl = () => startJob('zpl-copie');
+  const dlZpl = () => startJob('zpl-fichier');
   const importLabel = async () => {
     const f = await pickFile('.json,.mlz.json,application/json');
     if (f) importJsonText(await f.text());
@@ -108,6 +103,9 @@ export function TopBar() {
               <button className="mi" onClick={go(() => st.set('modal', 'saved'))}>
                 <FolderOpen size={16} /> {t('Mes étiquettes')}
               </button>
+              <button className="mi" onClick={go(() => st.set('modal', 'history'))}>
+                <History size={16} /> {t('Historique d’impression')}
+              </button>
               <button className="mi" onClick={go(() => st.set('modal', 'help'))}>
                 <HelpCircle size={16} /> {t('Aide et raccourcis')}
               </button>
@@ -127,13 +125,13 @@ export function TopBar() {
               </button>
               <hr />
               <div className="mt">{t('Image / document')}</div>
-              <button className="mi" onClick={go(() => downloadImage(doc, row, doc.dpi, 'png'))}>
+              <button className="mi" onClick={go(() => startJob('png'))}>
                 <ImageIcon size={16} /> {t('Télécharger en PNG')}
               </button>
-              <button className="mi" onClick={go(() => downloadImage(doc, row, doc.dpi, 'jpg'))}>
+              <button className="mi" onClick={go(() => startJob('jpg'))}>
                 <ImageIcon size={16} /> {t('Télécharger en JPG')}
               </button>
-              <button className="mi" onClick={go(() => downloadSvg(doc, row))}>
+              <button className="mi" onClick={go(() => startJob('svg'))}>
                 <FileType size={16} /> {t('Télécharger en SVG')}
               </button>
               <button className="mi" onClick={go(() => st.set('modal', 'export'))}>

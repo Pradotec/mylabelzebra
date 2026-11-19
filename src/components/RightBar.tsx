@@ -6,7 +6,7 @@ import { t } from '../i18n';
 import { parseDelimited, parseFile, fetchSheet } from '../data';
 import { insertToken } from '../actions';
 import { pickFile } from '../util';
-import { serialValue, dateValue, formatDate, docUsesSerial } from '../render/resolve';
+import { serialValue, dateValue, formatDate, docUsesSerial, resolveText } from '../render/resolve';
 import type { DataSet } from '../types';
 
 export function RightBar() {
@@ -290,6 +290,75 @@ function NumberPanel() {
   );
 }
 
+/** Construit le champ d'une date limite (DLC / DDM) : base (aujourd'hui ou colonne) + N jours */
+export function shelfLifeText(kind: 'dlc' | 'ddm', base: string, days: number, format: string, withPrefix = true) {
+  const src = base ? base : 'aujourdhui';
+  const tok = `{{${src}${days ? `|jours:${days >= 0 ? '+' : ''}${days}` : ''}|date:${format}}}`;
+  if (!withPrefix) return tok;
+  return (kind === 'dlc' ? 'À consommer jusqu’au ' : 'À consommer de préférence avant le ') + tok;
+}
+
+function ShelfLifeInsert() {
+  const st = useStore();
+  const cols = st.doc.data?.columns ?? [];
+  const [kind, setKind] = useState<'dlc' | 'ddm'>('dlc');
+  const [base, setBase] = useState('');
+  const [days, setDays] = useState(5);
+  const [fmt, setFmt] = useState('JJ/MM/AAAA');
+  const [prefix, setPrefix] = useState(true);
+  const txt = shelfLifeText(kind, base, days, fmt, prefix);
+  const ctx = { doc: st.doc, index: st.previewRow, row: st.doc.data?.rows[st.previewRow], resolve: true };
+  return (
+    <div className="sec">
+      <div className="sec-t">{t('Date limite (DLC / DDM)')}</div>
+      <div className="row">
+        <label className="check" style={{ margin: 0 }}>
+          <input type="radio" checked={kind === 'dlc'} onChange={() => (setKind('dlc'), setDays(days || 5))} /> {t('DLC (« À consommer jusqu’au »)')}
+        </label>
+        <label className="check" style={{ margin: 0 }}>
+          <input type="radio" checked={kind === 'ddm'} onChange={() => (setKind('ddm'), setDays(days < 30 ? 180 : days))} /> {t('DDM (« de préférence avant le »)')}
+        </label>
+      </div>
+      <div className="grid2">
+        <label className="f">
+          {t('À partir de')}
+          <select className="inp" value={base} onChange={(e) => setBase(e.target.value)}>
+            <option value="">{t('Aujourd’hui (date d’impression)')}</option>
+            {cols.map((c) => (
+              <option key={c} value={c}>
+                {t('Colonne « {c} »', { c })}
+              </option>
+            ))}
+          </select>
+        </label>
+        <NumField label={t('+ jours')} decimals={0} min={-3650} max={3650} value={days} onChange={(v) => setDays(Math.round(v))} />
+        <label className="f">
+          {t('Format')}
+          <select className="inp" value={fmt} onChange={(e) => setFmt(e.target.value)}>
+            {['JJ/MM/AAAA', 'JJ/MM/AA', 'JJ.MM.AAAA', 'MM/AAAA', 'JJ MMMM AAAA'].map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div style={{ alignSelf: 'end' }}>
+          <Check checked={prefix} onChange={setPrefix}>
+            {t('Avec la mention')}
+          </Check>
+        </div>
+      </div>
+      <div className="hint">
+        <code style={{ wordBreak: 'break-all' }}>{txt}</code>
+        <br />→ <b>{resolveText(txt, ctx)}</b>
+      </div>
+      <button className="btn block" onClick={() => insertToken(txt)}>
+        <CalendarDays size={16} /> {kind === 'dlc' ? t('Insérer la DLC') : t('Insérer la DDM')}
+      </button>
+    </div>
+  );
+}
+
 const DATE_FORMATS = ['DD/MM/YYYY', 'DD/MM/YY', 'DD.MM.YYYY', 'YYYY-MM-DD', 'MM/DD/YYYY', 'DD MMM YYYY', 'DD MMMM YYYY', 'MMM YYYY', 'MM/YY', 'DD/MM/YYYY HH:mm'];
 
 function DatePanel() {
@@ -333,6 +402,7 @@ function DatePanel() {
       <div className="hint" style={{ marginTop: 8 }}>
         {t('Astuce : {{date+30}} affiche la date dans 30 jours, indépendamment du réglage ci-dessus.')}
       </div>
+      <ShelfLifeInsert />
     </Panel>
   );
 }

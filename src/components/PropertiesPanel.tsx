@@ -29,6 +29,7 @@ import {
   Minus,
   Braces,
   ImageUp,
+  Info,
 } from 'lucide-react';
 import { useStore } from '../store';
 import type { LabelElement, TextEl, BarcodeEl, QrEl, ImageEl, ShapeEl, TableEl, CurveMode, Symbology, QrLevel } from '../types';
@@ -38,7 +39,10 @@ import { t } from '../i18n';
 import { FONTS, elementLabel, TYPE_LABELS } from '../elements';
 import { SYMBOLOGIES, encodeBarcode, encodeQr, qrPayload } from '../render/codes';
 import { shapeDef } from '../render/shapes';
-import { resolveText } from '../render/resolve';
+import { allergensFound } from '../render/allergens';
+import { Gs1Assistant, SsccAssistant, VarEanAssistant } from './Gs1Assist';
+import { resolveText, unknownFilters, FILTERS, conditionHolds, conditionValue, promptFields } from '../render/resolve';
+import type { CondOp, ShowCondition } from '../types';
 import { elementHeight, hasFixedHeight, layoutText, fitMode } from '../render/draw';
 import type { TextFit } from '../types';
 import { AlignJustify } from 'lucide-react';
@@ -66,6 +70,7 @@ export function PropertiesPanel() {
       {el?.type === 'image' && <ImageProps el={el} />}
       {el?.type === 'shape' && <ShapeProps el={el} />}
       {el?.type === 'table' && <TableProps el={el} />}
+      {el && <ConditionSection el={el} />}
       {el && <Geometry el={el} />}
       {sel.length > 1 && <MultiProps sel={sel} />}
     </Panel>
@@ -213,6 +218,76 @@ function MultiProps({ sel }: { sel: LabelElement[] }) {
   );
 }
 
+const COND_OPS: { v: CondOp; label: string }[] = [
+  { v: 'notEmpty', label: 'n’est pas vide' },
+  { v: 'empty', label: 'est vide' },
+  { v: 'eq', label: '=' },
+  { v: 'ne', label: '≠' },
+  { v: 'contains', label: 'contient' },
+];
+
+/** « Afficher seulement si … » : condition évaluée pour chaque ligne de données */
+function ConditionSection({ el }: { el: LabelElement }) {
+  const st = useStore();
+  const c = el.showIf;
+  const cols = st.doc.data?.columns ?? [];
+  const prompts = promptFields(st.doc).map((p) => '?' + p);
+  const set = (p: Partial<ShowCondition> | undefined) => up(el.id, { showIf: p === undefined ? undefined : ({ field: '', op: 'notEmpty', ...c, ...p } as ShowCondition) }, 'cond' + el.id);
+  const ctx = { doc: st.doc, index: st.previewRow, row: st.doc.data?.rows[st.previewRow], resolve: true };
+  const listId = 'cond-fields-' + el.id;
+  return (
+    <div className="sec">
+      <div className="row" style={{ justifyContent: 'space-between', margin: 0 }}>
+        <span className="sec-t" style={{ margin: 0 }}>{t('Afficher seulement si…')}</span>
+        {c ? (
+          <button className="btn sm flat" onClick={() => set(undefined)}>
+            {t('Retirer')}
+          </button>
+        ) : (
+          <button className="btn sm flat" onClick={() => set({ field: cols[0] ?? '', op: 'notEmpty' })}>
+            <Plus size={14} /> {t('Condition')}
+          </button>
+        )}
+      </div>
+      {c && (
+        <>
+          <div className="grid2" style={{ marginTop: 6 }}>
+            <label className="f">
+              {t('Colonne ou champ')}
+              <input className="inp" list={listId} value={c.field} placeholder="lot" onChange={(e) => set({ field: e.target.value })} onKeyDown={(e) => e.stopPropagation()} />
+              <datalist id={listId}>
+                {[...cols, 'numero', ...prompts].map((f) => (
+                  <option key={f} value={f} />
+                ))}
+              </datalist>
+            </label>
+            <label className="f">
+              {t('Condition')}
+              <select className="inp" value={c.op} onChange={(e) => set({ op: e.target.value as CondOp })}>
+                {COND_OPS.map((o) => (
+                  <option key={o.v} value={o.v}>
+                    {t(o.label)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {(c.op === 'eq' || c.op === 'ne' || c.op === 'contains') && (
+            <label className="f">
+              {t('Valeur')}
+              <input className="inp" value={c.value ?? ''} onChange={(e) => set({ value: e.target.value })} onKeyDown={(e) => e.stopPropagation()} />
+            </label>
+          )}
+          <div className={conditionHolds(c, ctx) ? 'okmsg' : 'hint'} style={{ marginTop: 4 }}>
+            {t('Ligne affichée : « {v} » → {r}', { v: conditionValue(c, ctx), r: conditionHolds(c, ctx) ? t('imprimé') : t('non imprimé') })}
+          </div>
+          <div className="hint">{t('Comparaison sans tenir compte des majuscules ni des accents. Évaluée pour chaque ligne (impression, PDF, ZPL, planches).')}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Geometry({ el }: { el: LabelElement }) {
   const st = useStore();
   const unit = st.grid.unit;
@@ -254,6 +329,49 @@ function Geometry({ el }: { el: LabelElement }) {
   );
 }
 
+/** Aide « Formats disponibles » : bouton (à côté de « {} Champ ») + encadré dépliable */
+export function useFormatsHelp() {
+  const [open, setOpen] = useState(false);
+  const button = (
+    <button className={'icon-btn flat sm' + (open ? ' on' : '')} onClick={() => setOpen(!open)} title={t('Formats disponibles')} aria-label={t('Formats disponibles')} aria-expanded={open}>
+      <Info size={15} />
+    </button>
+  );
+  const box = open ? (
+    <div className="formats-help" style={{ background: 'var(--bg)', borderRadius: 10, padding: '8px 10px', margin: '6px 0' }}>
+      <div className="row" style={{ justifyContent: 'space-between', margin: 0 }}>
+        <span className="sec-t" style={{ margin: 0 }}>{t('Formats disponibles')}</span>
+        <button className="btn sm flat" onClick={() => setOpen(false)}>{t('Fermer')}</button>
+      </div>
+      <div className="hint">{t('Ajoutez des filtres après le nom du champ, séparés par « | ». Ils s’appliquent de gauche à droite.')}</div>
+      <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+        <tbody>
+          {FILTERS.map((f) => (
+            <tr key={f.name} style={{ borderBottom: '1px solid var(--line)' }}>
+              <td style={{ padding: '4px 0' }}>
+                <code style={{ fontSize: 11.5, userSelect: 'all', wordBreak: 'break-all' }}>{f.example}</code>
+                <div style={{ color: 'var(--ink-2)' }}>{t(f.help)}</div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="hint" style={{ marginTop: 6 }}>
+        {t('Champs spéciaux : {{numero}}, {{date}}, {{date+30}}, {{aujourdhui}}. {{?Nom}} : valeur demandée au moment d’imprimer.')}
+      </div>
+      <div className="hint">{t('Dates : JJ (jour), MM (mois), MMM / MMMM (mois en lettres), AA / AAAA (année), HH:mm.')}</div>
+    </div>
+  ) : null;
+  return { button, box };
+}
+
+/** Avertissement : filtre inconnu dans un {{champ}} */
+export function FilterWarning({ text }: { text: string }) {
+  const bad = unknownFilters(text);
+  if (!bad.length) return null;
+  return <div className="err">{t('Format inconnu ignoré : {f}', { f: bad.join(', ') })}</div>;
+}
+
 /** Menu d'insertion de champs {{…}} */
 export function FieldMenu({ onInsert }: { onInsert: (tok: string) => void }) {
   const cols = useStore((s) => s.doc.data?.columns ?? []);
@@ -285,6 +403,12 @@ export function FieldMenu({ onInsert }: { onInsert: (tok: string) => void }) {
           <button className="mi" onClick={() => (onInsert('{{date+30}}'), close())}>
             {'{{date+30}}'} <span className="k">{t('date + 30 j')}</span>
           </button>
+          <button className="mi" onClick={() => (onInsert('{{aujourdhui|date:JJ/MM/AAAA}}'), close())}>
+            {'{{aujourdhui}}'} <span className="k">{t('date du jour')}</span>
+          </button>
+          <button className="mi" onClick={() => (onInsert('{{?Lot}}'), close())}>
+            {'{{?Lot}}'} <span className="k">{t('saisi à l’impression')}</span>
+          </button>
           {!cols.length && <div className="hint" style={{ padding: '4px 10px' }}>{t('Importez des données (panneau Données) pour voir vos colonnes ici.')}</div>}
         </>
       )}
@@ -303,7 +427,7 @@ function TextFitSection({ el }: { el: TextEl }) {
   const st = useStore();
   const mode = fitMode(el);
   const ctx = { doc: st.doc, index: st.previewRow, row: st.doc.data?.rows[st.previewRow], resolve: true };
-  const L = layoutText(el, resolveText(el.text, ctx));
+  const L = layoutText(el, resolveText(el.text, ctx), st.doc.allergensExtra);
   const opt = FIT_OPTIONS.find((o) => o.v === mode)!;
   const setMode = (v: TextFit) => {
     const patch: Partial<TextEl> = { fit: v, autoShrink: undefined };
@@ -356,17 +480,62 @@ function TextFitSection({ el }: { el: TextEl }) {
   );
 }
 
+/** Allergènes en gras (INCO) + liste complémentaire propre à l'étiquette */
+function AllergenSection({ el }: { el: TextEl }) {
+  const st = useStore();
+  const extra = st.doc.allergensExtra ?? [];
+  const [draft, setDraft] = useState(extra.join(', '));
+  const ctx = { doc: st.doc, index: st.previewRow, row: st.doc.data?.rows[st.previewRow], resolve: true };
+  const found = el.boldAllergens ? allergensFound(resolveText(el.text, ctx), extra) : [];
+  return (
+    <div className="sec">
+      <Check checked={!!el.boldAllergens} onChange={(v) => up(el.id, { boldAllergens: v })} title={t('Met en gras les 14 allergènes du règlement INCO (UE 1169/2011) et leurs variantes')}>
+        {t('Allergènes en gras (INCO)')}
+      </Check>
+      {el.boldAllergens && (
+        <>
+          {el.bold && <div className="hint">{t('Le texte est déjà entièrement en gras : désactivez « Gras » pour faire ressortir les allergènes.')}</div>}
+          <div className="hint">{found.length ? t('Repérés : {l}', { l: found.join(', ') }) : t('Aucun allergène repéré dans la ligne affichée.')}</div>
+          <label className="f">
+            {t('Allergènes supplémentaires (séparés par des virgules)')}
+            <input
+              className="inp"
+              value={draft}
+              placeholder="ex. : chocolat, kiwi"
+              onChange={(e) => {
+                setDraft(e.target.value);
+                const list = e.target.value
+                  .split(/[,;\n]/)
+                  .map((x) => x.trim())
+                  .filter(Boolean);
+                st.setDoc((d) => void (d.allergensExtra = list.length ? list : undefined), 'allergens');
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+            />
+          </label>
+        </>
+      )}
+    </div>
+  );
+}
+
 function TextProps({ el }: { el: TextEl }) {
   const curve = el.curve || 'none';
+  const help = useFormatsHelp();
   return (
     <>
       <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
         <span className="sec-t" style={{ margin: 0 }}>
           {t('Texte')}
         </span>
-        <FieldMenu onInsert={(tok) => up(el.id, { text: el.text + tok })} />
+        <span className="row" style={{ margin: 0, gap: 2 }}>
+          {help.button}
+          <FieldMenu onInsert={(tok) => up(el.id, { text: el.text + tok })} />
+        </span>
       </div>
+      {help.box}
       <textarea className="inp" rows={3} value={el.text} onChange={(e) => up(el.id, { text: e.target.value }, 'text' + el.id)} onKeyDown={(e) => e.stopPropagation()} aria-label={t('Texte')} />
+      <FilterWarning text={el.text} />
       <div className="hint">{t('Double-cliquez sur le texte dans l’étiquette pour le modifier directement.')}</div>
       <div className="grid2">
         <label className="f">
@@ -411,6 +580,7 @@ function TextProps({ el }: { el: TextEl }) {
       <Check checked={el.invert} onChange={(v) => up(el.id, { invert: v })}>
         {t('Inverser (texte blanc sur fond noir)')}
       </Check>
+      <AllergenSection el={el} />
       <TextFitSection el={el} />
       <div className="sec">
         <div className="sec-t">{t('Texte courbé')}</div>
@@ -448,6 +618,7 @@ function BarcodeProps({ el }: { el: BarcodeEl }) {
   const resolved = resolveText(el.value, { doc: st.doc, index: st.previewRow, row: st.doc.data?.rows[st.previewRow], resolve: true });
   const enc = encodeBarcode(resolved, el.symbology);
   const twoD = el.symbology === 'datamatrix';
+  const help = useFormatsHelp();
   return (
     <>
       <label className="f" style={{ marginBottom: 8 }}>
@@ -474,11 +645,19 @@ function BarcodeProps({ el }: { el: BarcodeEl }) {
         <span className="sec-t" style={{ margin: 0 }}>
           {t('Valeur')}
         </span>
-        <FieldMenu onInsert={(tok) => up(el.id, { value: tok })} />
+        <span className="row" style={{ margin: 0, gap: 2 }}>
+          {help.button}
+          <FieldMenu onInsert={(tok) => up(el.id, { value: tok })} />
+        </span>
       </div>
+      {help.box}
       <input className={'inp' + (enc.error !== undefined ? ' bad' : '')} value={el.value} onChange={(e) => up(el.id, { value: e.target.value }, 'val' + el.id)} onKeyDown={(e) => e.stopPropagation()} aria-label={t('Valeur du code-barres')} style={{ marginBottom: 6 }} />
+      <FilterWarning text={el.value} />
       {enc.error !== undefined ? <div className="err">{enc.error}</div> : <div className="hint">{t(info.hint)}</div>}
       {resolved !== el.value && enc.error === undefined && <div className="hint">→ {resolved}</div>}
+      {el.symbology === 'gs1-128' && <Gs1Assistant el={el} />}
+      {el.symbology === 'sscc18' && <SsccAssistant el={el} />}
+      {el.symbology === 'ean13' && <VarEanAssistant el={el} />}
       {!twoD && (
         <>
           <Check checked={el.showText} onChange={(v) => up(el.id, { showText: v })}>
@@ -505,6 +684,7 @@ function QrProps({ el }: { el: QrEl }) {
   const vc = el.vcard || { firstName: '', lastName: '', org: '', title: '', phone: '', email: '', url: '', address: '' };
   const setW = (p: Partial<typeof wifi>) => up(el.id, { wifi: { ...wifi, ...p } }, 'wifi' + el.id);
   const setV = (p: Partial<typeof vc>) => up(el.id, { vcard: { ...vc, ...p } }, 'vcard' + el.id);
+  const help = useFormatsHelp();
   const vf = (k: keyof typeof vc, label: string) => (
     <label className="f">
       {label}
@@ -530,9 +710,14 @@ function QrProps({ el }: { el: QrEl }) {
             <span className="sec-t" style={{ margin: 0 }}>
               {t('Contenu')}
             </span>
-            <FieldMenu onInsert={(tok) => up(el.id, { value: el.value + tok })} />
+            <span className="row" style={{ margin: 0, gap: 2 }}>
+              {help.button}
+              <FieldMenu onInsert={(tok) => up(el.id, { value: el.value + tok })} />
+            </span>
           </div>
+          {help.box}
           <textarea className={'inp' + (q.error !== undefined ? ' bad' : '')} rows={2} value={el.value} onChange={(e) => up(el.id, { value: e.target.value }, 'qr' + el.id)} onKeyDown={(e) => e.stopPropagation()} aria-label={t('Contenu du QR code')} />
+          <FilterWarning text={el.value} />
         </>
       )}
       {el.qrType === 'wifi' && (
@@ -722,6 +907,7 @@ function TableProps({ el }: { el: TableEl }) {
           )),
         )}
       </div>
+      <FilterWarning text={el.cells.flat().join(' ')} />
       <div className="hint">{t('Double-cliquez une cellule sur l’étiquette pour la saisir ; tirez les séparateurs pour redimensionner.')}</div>
       <div className="grid2">
         <NumField label={t('Taille du texte')} suffix="pt" min={4} max={300} value={el.fontSize} onChange={(v) => up(el.id, { fontSize: v }, 'tfs')} />

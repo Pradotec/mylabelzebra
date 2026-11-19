@@ -1,6 +1,7 @@
 import type { LabelDoc, LabelElement, TextEl, BarcodeEl, ShapeEl, QrEl, TableEl, Symbology, Align } from './types';
 import { newDoc } from './elements';
 import { uid } from './util';
+import { gs1Check } from './render/codes';
 
 type TOpts = Partial<TextEl>;
 const NL = String.fromCharCode(10);
@@ -322,5 +323,60 @@ export const TEMPLATES: Template[] = [
         T('19,90 €', 136, 48, 262, 62, { bold: true }),
         B('370012345678', 136, 124, 262, 76, 'ean13', { showText: false }),
       ]),
+  },
+  {
+    id: 'alimentaire',
+    name: 'Étiquette produit alimentaire 4×3',
+    categories: ['alimentaire', 'produit'],
+    brands: ['Zebra', 'Rollo'],
+    build: () =>
+      doc('Étiquette produit alimentaire', 4, 3, [
+        T('Confiture extra de fraises', 20, 16, 772, 44, { bold: true, name: 'Dénomination' }),
+        T(
+          'Ingrédients : fraises 55 %, sucre de canne, jus de citron, gélifiant : pectine de fruits. Peut contenir des traces de fruits à coque et de lait. Préparée avec 55 g de fruits pour 100 g.',
+          20,
+          74,
+          772,
+          24,
+          { fit: 'wrapShrink', h: 172, vAlign: 'top', boldAllergens: true, name: 'Ingrédients' },
+        ),
+        S('line', 20, 254, 772, 3),
+        T('Poids net : 370 g', 20, 270, 430, 32, { bold: true, name: 'Poids net' }),
+        T('Lot : {{?Lot}}', 20, 318, 430, 26, { name: 'Lot' }),
+        T('À consommer jusqu’au {{aujourdhui|jours:+21|date:JJ/MM/AAAA}}', 20, 356, 430, 24, { bold: true, name: 'DLC' }),
+        T('À conserver au réfrigérateur après ouverture et à consommer dans les 3 semaines.', 20, 396, 430, 20, { fit: 'wrapShrink', h: 70, vAlign: 'top', name: 'Conservation' }),
+        B('376012345678', 470, 268, 322, 200, 'ean13', { fontSize: 24, name: 'EAN-13' }),
+        S('line', 20, 548, 772, 2),
+        T('Atelier Exemple — 12 rue des Lilas, 69003 Lyon — FR', 20, 562, 772, 20, { align: 'center', name: 'Fabricant' }),
+      ]),
+  },
+  {
+    id: 'gs1-colis',
+    name: 'Colis / palette GS1-128 4×6',
+    categories: ['expedition', 'entrepot', 'alimentaire'],
+    brands: ['Zebra', 'Rollo'],
+    build: () => {
+      const gtin = '0376012345000';
+      const g14 = gtin + gs1Check(gtin);
+      return doc('Étiquette logistique GS1-128', 4, 6, [
+        T('Atelier Exemple', 24, 20, 764, 40, { bold: true, name: 'Expéditeur' }),
+        T('12 rue des Lilas — 69003 Lyon — FRANCE', 24, 66, 764, 24),
+        S('line', 0, 106, 812, 5),
+        T('COLIS N°', 24, 122, 300, 22, { bold: true }),
+        T('{{numero}}', 24, 148, 764, 34, { bold: true, name: 'Numéro de colis' }),
+        T('CONTENU', 24, 198, 360, 20, { bold: true }),
+        T(g14, 24, 222, 360, 30, { name: 'GTIN' }),
+        T('QUANTITÉ', 420, 198, 360, 20, { bold: true }),
+        T('24', 420, 222, 360, 30),
+        T('LOT', 24, 268, 360, 20, { bold: true }),
+        T('{{?Lot}}', 24, 292, 360, 30),
+        T('DLC', 420, 268, 360, 20, { bold: true }),
+        T('{{aujourdhui|jours:+21|date:JJ/MM/AAAA}}', 420, 292, 360, 30),
+        S('line', 0, 344, 812, 5),
+        B(`(02)${g14}(17){{aujourdhui|jours:+21|date:AAMMJJ}}(37)24`, 40, 372, 732, 230, 'gs1-128', { fontSize: 24, name: 'GS1-128 contenu' }),
+        B('(10){{?Lot}}', 40, 640, 732, 200, 'gs1-128', { fontSize: 24, name: 'GS1-128 lot' }),
+        B('0376012340000000{{numero}}', 40, 890, 732, 260, 'sscc18', { fontSize: 26, name: 'SSCC' }),
+      ], { numbering: { start: 1, step: 1, padding: 0, prefix: '', suffix: '', count: 1 } });
+    },
   },
 ];

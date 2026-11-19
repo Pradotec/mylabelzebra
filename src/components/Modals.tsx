@@ -1,19 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FolderOpen, Trash2, Copy, Pencil, HelpCircle, Printer, Monitor, RefreshCw, AlertTriangle, CheckCircle2, Download, FileDown, Grid3x3, Barcode, QrCode, Plus, ExternalLink, Settings2 } from 'lucide-react';
+import { FolderOpen, Trash2, Copy, Pencil, HelpCircle, Printer, Monitor, RefreshCw, AlertTriangle, CheckCircle2, Download, FileDown, Grid3x3, Barcode, QrCode, Plus, ExternalLink, Settings2, History, RotateCcw, FormInput } from 'lucide-react';
 import { useStore } from '../store';
 import { Modal, NumField, Seg, Check } from './ui';
 import { t, getLang, setLang, LANGS } from '../i18n';
-import { listSaved, deleteSaved, renameSaved, duplicateSaved, confirmDiscard, sendToZebra, MAX_SAVED, setLabelSize } from '../actions';
+import { listSaved, deleteSaved, renameSaved, duplicateSaved, confirmDiscard, MAX_SAVED, setLabelSize } from '../actions';
 import type { SavedLabel, Symbology, QrLevel, LabelDoc } from '../types';
 import { batchJobs } from '../render/resolve';
-import { printOnComputer, testPrint, downloadPdf, downloadPdfZip, downloadSheetsPdf, sheetPages } from '../export';
-import { generateBatchZpl } from '../zpl/generate';
+import { testPrint, sheetPages } from '../export';
+import { startJob, listHistory, clearHistory, deleteHistory, reprint, historyDocForEditing, JOB_LABELS, MAX_HISTORY, type HistoryEntry } from '../jobs';
 import * as zebra from '../zebra';
 import { SHEETS, sheetById, sizeLabel } from '../sizes';
 import { SYMBOLOGIES, encodeBarcode, encodeQr } from '../render/codes';
 import { renderLabel } from '../render/draw';
 import { makeBarcode, makeQr, newDoc } from '../elements';
-import { canvasToBlob, downloadBlob } from '../util';
+import { canvasToBlob, downloadBlob, copyText } from '../util';
+import { promptFields } from '../render/resolve';
+import { encodeBase64Url, listAutoPrint, revokeAutoPrint } from '../remote';
 import { BASE_DPI } from '../types';
 
 const closeModal = () => useStore.getState().set('modal', null);
@@ -104,6 +106,170 @@ export function SavedLabels() {
   );
 }
 
+// ---------- Saisie à l'impression ({{?Nom}}) ----------
+export function PromptDialog() {
+  const ask = useStore((s) => s.promptAsk);
+  const [vals, setVals] = useState<Record<string, string>>(ask?.values ?? {});
+  useEffect(() => setVals(ask?.values ?? {}), [ask]);
+  if (!ask) return null;
+  const ok = () => ask.resolve(vals);
+  return (
+    <Modal
+      title={t('Valeurs à saisir pour cette impression')}
+      icon={<FormInput size={20} />}
+      onClose={() => ask.resolve(null)}
+      footer={
+        <>
+          <button className="btn flat" onClick={() => ask.resolve(null)}>
+            {t('Annuler')}
+          </button>
+          <button className="btn accent" onClick={ok}>
+            <Printer size={16} /> {t('Continuer')}
+          </button>
+        </>
+      }
+    >
+      <div className="hint">{t('Ces valeurs s’appliquent à toutes les étiquettes de ce travail. Les dernières valeurs sont mémorisées pour cette étiquette.')}</div>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          ok();
+        }}
+      >
+        {ask.fields.map((f, i) => (
+          <label key={f} className="f" style={{ marginBottom: 8 }}>
+            {f}
+            <input
+              className="inp"
+              autoFocus={i === 0}
+              value={vals[f] ?? ''}
+              onChange={(e) => setVals({ ...vals, [f]: e.target.value })}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Escape') ask.resolve(null);
+              }}
+              aria-label={f}
+            />
+          </label>
+        ))}
+        <button type="submit" style={{ display: 'none' }} />
+      </form>
+    </Modal>
+  );
+}
+
+// ---------- Historique d'impression ----------
+export function HistoryModal() {
+  const st = useStore();
+  const [list, setList] = useState<HistoryEntry[] | null>(null);
+  const [busy, setBusy] = useState('');
+  const refresh = () => listHistory().then(setList);
+  useEffect(() => {
+    refresh();
+  }, []);
+  const fmt = (n: number) => new Date(n).toLocaleString(getLang() === 'fr' ? 'fr-FR' : 'en-US', { dateStyle: 'short', timeStyle: 'medium' });
+  const rowsLabel = (e: HistoryEntry) => {
+    if (!e.rows.length) return '';
+    const r = e.rows.map((i) => i + 1);
+    return r.length > 8 ? `${r.slice(0, 8).join(', ')}… (${r.length})` : r.join(', ');
+  };
+  return (
+    <Modal
+      title={t('Historique d’impression')}
+      wide
+      icon={<History size={20} />}
+      onClose={closeModal}
+      footer={
+        <button
+          className="btn flat"
+          style={{ color: 'var(--err)' }}
+          disabled={!list?.length}
+          onClick={async () => {
+            if (!window.confirm(t('Effacer tout l’historique d’impression ?'))) return;
+            await clearHistory();
+            refresh();
+          }}
+        >
+          <Trash2 size={15} /> {t('Effacer l’historique')}
+        </button>
+      }
+    >
+      <div className="hint">
+        {t('Conservé dans ce navigateur ({n} derniers travaux). « Réimprimer » reproduit exactement le travail (mêmes données, valeurs saisies et dates).', { n: MAX_HISTORY })}
+      </div>
+      {list && !list.length && <div className="hint">{t('Aucune impression pour l’instant.')}</div>}
+      {!!list?.length && (
+        <div className="scrollbox" style={{ maxHeight: '60vh' }}>
+          <table className="data-table history-table">
+            <thead>
+              <tr>
+                <th>{t('Date')}</th>
+                <th>{t('Étiquette')}</th>
+                <th>{t('Sortie')}</th>
+                <th>{t('Nb')}</th>
+                <th>{t('Lignes')}</th>
+                <th>{t('Valeurs saisies')}</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((e) => (
+                <tr key={e.id}>
+                  <td style={{ whiteSpace: 'nowrap' }}>{fmt(e.at)}</td>
+                  <td title={e.name}>
+                    {e.name}
+                    {e.reprintOf ? <span className="k"> · {t('réimpression')}</span> : null}
+                    {e.source ? <span className="k"> · {e.source === 'url' ? t('lien') : e.source}</span> : null}
+                  </td>
+                  <td>{t(JOB_LABELS[e.kind])}</td>
+                  <td>{e.count}</td>
+                  <td title={e.rows.map((i) => i + 1).join(', ')}>{rowsLabel(e)}</td>
+                  <td>
+                    {Object.entries(e.prompts)
+                      .map(([k, v]) => `${k} : ${v}`)
+                      .join(' · ')}
+                  </td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <button
+                      className="btn sm flat"
+                      disabled={!!busy}
+                      title={t('Réimprimer à l’identique')}
+                      onClick={async () => {
+                        setBusy(e.id);
+                        try {
+                          if (await reprint(e)) refresh();
+                        } finally {
+                          setBusy('');
+                        }
+                      }}
+                    >
+                      <RotateCcw size={14} /> {t('Réimprimer')}
+                    </button>
+                    <button
+                      className="btn sm flat"
+                      title={t('Ouvrir cette version dans l’éditeur')}
+                      onClick={() => {
+                        if (!confirmDiscard()) return;
+                        st.loadDoc(historyDocForEditing(e), true);
+                        closeModal();
+                      }}
+                    >
+                      <FolderOpen size={14} /> {t('Ouvrir')}
+                    </button>
+                    <button className="icon-btn flat sm" aria-label={t('Supprimer')} title={t('Supprimer')} onClick={async () => (await deleteHistory(e.id), refresh())}>
+                      <Trash2 size={13} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 // ---------- Aide ----------
 export function HelpModal() {
   const K = ({ k }: { k: string }) => <span className="kbd">{k}</span>;
@@ -124,8 +290,20 @@ export function HelpModal() {
     ['Double-clic', 'Modifier un texte ou une cellule'],
     ['Échap', 'Désélectionner / fermer'],
   ];
+  const [tab, setTab] = useState<'aide' | 'integration'>('aide');
   return (
-    <Modal title={t('Aide')} icon={<HelpCircle size={20} />} onClose={closeModal}>
+    <Modal title={t('Aide')} wide={tab === 'integration'} icon={<HelpCircle size={20} />} onClose={closeModal}>
+      <div className="row" style={{ marginTop: 0 }}>
+        <Seg
+          value={tab}
+          onChange={setTab}
+          options={[
+            { v: 'aide', label: t('Aide et raccourcis') },
+            { v: 'integration', label: t('Intégration') },
+          ]}
+        />
+      </div>
+      {tab === 'integration' ? <IntegrationHelp /> : <>
       <p style={{ marginTop: 0 }}>{t('MyLabelZebra est un éditeur d’étiquettes gratuit qui fonctionne entièrement dans votre navigateur : aucune donnée n’est envoyée sur un serveur.')}</p>
       <div className="sec-t">{t('Raccourcis clavier')}</div>
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -154,7 +332,109 @@ export function HelpModal() {
         <div className="sec-t">{t('Langue')}</div>
         <Seg value={getLang()} onChange={(v) => setLang(v)} options={LANGS.map((l) => ({ v: l.id, label: l.label }))} />
       </div>
+      </>}
     </Modal>
+  );
+}
+
+/** Bloc de code copiable */
+function CodeBlock({ code }: { code: string }) {
+  const st = useStore();
+  return (
+    <div style={{ position: 'relative', marginBottom: 10 }}>
+      <pre className="inp code" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 11.5, margin: 0, padding: '8px 10px', height: 'auto', maxHeight: 260, overflow: 'auto' }}>{code}</pre>
+      <button className="btn sm" style={{ position: 'absolute', top: 6, right: 6 }} onClick={async () => (await copyText(code)) && st.toast(t('Copié'), 'ok')}>
+        <Copy size={13} /> {t('Copier')}
+      </button>
+    </div>
+  );
+}
+
+/** Page « Intégration » : piloter l'impression depuis un autre outil (lien, postMessage) */
+function IntegrationHelp() {
+  const st = useStore();
+  const [, refresh] = useState(0);
+  const name = st.doc.name || 'Mon étiquette';
+  const fields = promptFields(st.doc);
+  const cols = st.doc.data?.columns.length ? st.doc.data.columns : ['nom', 'prix'];
+  const sampleRows = [Object.fromEntries(cols.map((c) => [c, st.doc.data?.rows[0]?.[c] ?? 'exemple']))];
+  const base = location.origin + location.pathname;
+  const invite = fields.map((f) => `&invite.${encodeURIComponent(f)}=${encodeURIComponent('valeur')}`).join('');
+  const link = `${base}?modele=${encodeURIComponent(name)}&data=${encodeBase64Url(JSON.stringify(sampleRows))}&imprimer=zebra&copies=1${invite}`;
+  const js = `// Ouvre l'éditeur dans un nouvel onglet puis envoie la demande dès qu'il est prêt
+const mlz = window.open('${base}', 'mylabelzebra');
+window.addEventListener('message', (e) => {
+  if (e.source !== mlz) return;
+  if (e.data?.type === 'mlz.ready') {
+    mlz.postMessage({
+      type: 'mlz.print',
+      id: 'commande-1042',            // renvoyé tel quel dans la réponse
+      modele: ${JSON.stringify(name)},   // nom ou identifiant dans « Mes étiquettes »
+      rows: ${JSON.stringify(sampleRows)},
+      prompts: ${JSON.stringify(Object.fromEntries(fields.map((f) => [f, 'valeur'])))},
+      imprimer: 'zebra',              // zebra | ordinateur | pdf | zpl
+      copies: 1,
+    }, '${location.origin}');
+  }
+  if (e.data?.type === 'mlz.result') {
+    console.log(e.data.ok ? \`\${e.data.count} étiquette(s) imprimée(s)\` : 'Échec : ' + e.data.error);
+  }
+});`;
+  const py = `# Construire le lien depuis un script (Python)
+import base64, json, urllib.parse
+rows = ${JSON.stringify(sampleRows)}
+data = base64.urlsafe_b64encode(json.dumps(rows).encode()).decode().rstrip('=')
+url = '${base}?modele=' + urllib.parse.quote(${JSON.stringify(name)}) + '&data=' + data + '&imprimer=pdf'`;
+  const perms = Object.entries(listAutoPrint());
+  return (
+    <>
+      <p style={{ marginTop: 0 }}>
+        {t('Un autre outil (back-office, tableur, script) peut demander une impression à MyLabelZebra, sans serveur : tout se passe dans ce navigateur. Le modèle doit être enregistré dans « Mes étiquettes ».')}
+      </p>
+      <div className="sec-t">{t('1. Par un lien')}</div>
+      <table className="data-table" style={{ marginBottom: 8 }}>
+        <tbody>
+          {[
+            ['modele', t('nom ou identifiant de l’étiquette enregistrée (obligatoire)')],
+            ['data', t('lignes de données : tableau JSON d’objets, encodé en base64url (une étiquette par objet, toutes cochées)')],
+            ['imprimer', t('zebra, ordinateur, pdf ou zpl (sans ce paramètre, l’étiquette est seulement ouverte)')],
+            ['copies', t('copies par ligne (ou de l’étiquette seule)')],
+            ['invite.Nom', t('valeur d’un champ {{?Nom}} saisi à l’impression')],
+          ].map(([k, v]) => (
+            <tr key={k}>
+              <td style={{ maxWidth: 'none', width: 110 }}>
+                <code>{k}</code>
+              </td>
+              <td style={{ maxWidth: 'none', whiteSpace: 'normal' }}>{v}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <CodeBlock code={link} />
+      <CodeBlock code={py} />
+      <div className="sec-t">{t('2. Par window.postMessage (application qui ouvre ou intègre l’éditeur)')}</div>
+      <div className="hint">{t('L’éditeur envoie { type: "mlz.ready" } à la fenêtre qui l’a ouvert (ou à la page qui l’intègre dans une iframe), puis répond à chaque demande par { type: "mlz.result", ok, count, error, id }.')}</div>
+      <CodeBlock code={js} />
+      <div className="sec-t">{t('Sécurité')}</div>
+      <ul style={{ paddingLeft: 18, lineHeight: 1.55, fontSize: 13, marginTop: 0 }}>
+        <li>{t('Au premier usage, un bandeau demande toujours confirmation (origine, modèle, nombre d’étiquettes, imprimante).')}</li>
+        <li>{t('« Autoriser l’impression automatique pour ce modèle » supprime la confirmation pour ce modèle et cette origine uniquement.')}</li>
+        <li>{t('Les champs {{?Nom}} non fournis sont demandés dans la fenêtre de saisie.')}</li>
+        <li>{t('Chaque impression est inscrite dans l’historique d’impression (Options).')}</li>
+      </ul>
+      <div className="sec-t">{t('Impressions automatiques autorisées')}</div>
+      {!perms.length && <div className="hint">{t('Aucune.')}</div>}
+      {perms.map(([k, p]) => (
+        <div key={k} className="row" style={{ justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 13 }}>
+            « {p.name} » — {p.source === 'url' ? t('liens') : p.source}
+          </span>
+          <button className="btn sm flat" style={{ color: 'var(--err)' }} onClick={() => (revokeAutoPrint(k), refresh((x) => x + 1))}>
+            {t('Retirer')}
+          </button>
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -173,15 +453,8 @@ export function PrintDialog() {
   const run = async (onlyCurrent: boolean) => {
     setBusy(true);
     try {
-      const list = onlyCurrent ? [{ index: st.previewRow, copies }] : jobs;
-      if (printer === 'zebra') {
-        const zpl = onlyCurrent ? generateBatchZpl(doc, st.previewRow, true, copies) : generateBatchZpl(doc, st.previewRow);
-        const ok = await sendToZebra(zpl, !onlyCurrent);
-        if (ok) closeModal();
-      } else {
-        await printOnComputer(doc, list, st.previewRow);
-        closeModal();
-      }
+      const n = await startJob(printer === 'zebra' ? 'zebra' : 'ordinateur', { onlyCurrent, copies });
+      if (n != null) closeModal();
     } finally {
       setBusy(false);
     }
@@ -269,9 +542,8 @@ export function ExportDialog() {
   const go = async (zip: boolean) => {
     setBusy(true);
     try {
-      if (zip) await downloadPdfZip(doc, jobs, +dpi);
-      else await downloadPdf(doc, jobs, +dpi);
-      closeModal();
+      const n = await startJob(zip ? 'pdf-zip' : 'pdf', { dpi: +dpi, onlyCurrent: mode === 'current', copies: 1 });
+      if (n != null) closeModal();
     } finally {
       setBusy(false);
     }
@@ -524,10 +796,10 @@ export function SheetsDialog() {
             <button className="btn flat" onClick={() => testPrint(doc)}>
               {t('Impression test')}
             </button>
-            <button className="btn" onClick={() => downloadSheetsPdf(doc, st.previewRow)}>
+            <button className="btn" onClick={() => startJob('planches-pdf')}>
               <Download size={16} /> {t('Télécharger le PDF ({n} page(s))', { n: pages })}
             </button>
-            <button className="btn accent" onClick={() => (st.set('printer', 'computer'), printOnComputer(doc, [], st.previewRow))}>
+            <button className="btn accent" onClick={() => (st.set('printer', 'computer'), startJob('planches'))}>
               <Printer size={16} /> {t('Imprimer')}
             </button>
           </>

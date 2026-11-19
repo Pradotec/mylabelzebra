@@ -17,11 +17,11 @@ import {
   tableColumns,
   tableRows,
 } from './render/draw';
-import { batchJobs, resolveText, type PrintJob, type ResolveCtx } from './render/resolve';
+import { batchJobs, resolveText, isPrinted, type PrintJob, type ResolveCtx } from './render/resolve';
 import { encodeBarcode, encodeQr, qrPayload, type MatrixCode } from './render/codes';
 import { preloadImages } from './render/images';
 import { shapeDef } from './render/shapes';
-import { fontString as fontStr, textOffsetY, justifyWords } from './render/textLayout';
+import { fontString as fontStr, textOffsetY, justifyWords, richSegments } from './render/textLayout';
 import { canvasToBlob, downloadBlob, downloadText, safeFileName } from './util';
 import { normalizeDoc } from './elements';
 import { sheetById, type SheetDef } from './sizes';
@@ -290,7 +290,7 @@ function elementSvg(el: LabelElement, ctx: ResolveCtx, doc: LabelDoc): string {
     case 'text': {
       if (el.curve && el.curve !== 'none') return '';
       const txt = resolveText(el.text, ctx);
-      const L = layoutText(el, txt);
+      const L = layoutText(el, txt, doc.allergensExtra);
       const font = fontStr(el, L.fontSize);
       const fg = el.invert ? (col(el.color).toLowerCase() === '#ffffff' ? '#000' : '#fff') : col(el.color);
       const clipId = 'c' + el.id;
@@ -304,6 +304,12 @@ function elementSvg(el: LabelElement, ctx: ResolveCtx, doc: LabelDoc): string {
       const attrs = `dominant-baseline="central" font-family="${escXml(el.fontFamily)}" font-size="${L.fontSize}"${el.bold ? ' font-weight="bold"' : ''}${el.italic ? ' font-style="italic"' : ''}${el.underline ? ' text-decoration="underline"' : ''} fill="${fg}" xml:space="preserve"`;
       L.lines.forEach((ln, i) => {
         const y = oy + L.pad + i * L.lh + L.lh / 2;
+        if (ln.runs) {
+          // texte enrichi : un <text> par segment, gras pour les allergènes
+          for (const sg of richSegments(el, ln, L.fontSize, el.w - L.pad * 2))
+            s += `<text x="${L.pad + sg.x}" y="${y}" ${attrs}${sg.bold ? ' font-weight="bold"' : ''}>${escXml(sg.text)}</text>`;
+          return;
+        }
         const jw = el.align === 'justify' ? justifyWords(ln, font, el.w - L.pad * 2) : null;
         if (jw) jw.forEach((w) => (s += `<text x="${L.pad + w.x}" y="${y}" ${attrs}>${escXml(w.word)}</text>`));
         else s += `<text x="${ax}" y="${y}" text-anchor="${anchor}" ${attrs}>${escXml(ln.text)}</text>`;
@@ -382,7 +388,7 @@ export async function downloadSvg(doc: LabelDoc, index: number) {
   const ctx: ResolveCtx = { doc, index, row: doc.data?.rows[index], resolve: true };
   let body = `<rect width="${W}" height="${H}" fill="${escXml(doc.background || '#fff')}"/>`;
   for (const el of doc.elements) {
-    if (el.hidden) continue;
+    if (!isPrinted(el, ctx)) continue;
     const h = elementHeight(el, ctx);
     let inner = el.flipX || el.flipY ? '' : elementSvg(el, ctx, doc);
     let tr = `translate(${el.x} ${el.y})${el.rotation ? ` rotate(${el.rotation})` : ''}`;

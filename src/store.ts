@@ -22,7 +22,8 @@ export type Modal =
   | 'sheets'
   | 'tool-barcode'
   | 'tool-qr'
-  | 'export';
+  | 'export'
+  | 'history';
 
 export interface GridPrefs {
   show: boolean;
@@ -51,6 +52,8 @@ interface State {
   zoom: number;
   pan: { x: number; y: number };
   preview: boolean;
+  /** aperçu thermique : rendu monochrome à la résolution de l'imprimante */
+  thermal: boolean;
   previewRow: number;
   showData: boolean;
   printer: Printer;
@@ -65,6 +68,26 @@ interface State {
   dirty: boolean;
   /** demande de recadrage du zoom (incrémenté) */
   fitRequest: number;
+  /** saisie des champs {{?Nom}} avant un travail d'impression / export */
+  promptAsk: PromptAsk | null;
+  /** demande d'impression venue d'un autre outil (lien / postMessage), en attente de confirmation */
+  remoteRequest: RemoteRequest | null;
+}
+
+export interface PromptAsk {
+  fields: string[];
+  values: Record<string, string>;
+  resolve: (v: Record<string, string> | null) => void;
+}
+
+export interface RemoteRequest {
+  /** 'url' ou origine de la fenêtre qui a envoyé le message */
+  source: string;
+  docName: string;
+  docId: string;
+  target: string;
+  count: number;
+  resolve: (ok: boolean, remember: boolean) => void;
 }
 
 interface Actions {
@@ -106,6 +129,7 @@ export const useStore = create<State & Actions>()((set, get) => ({
   zoom: 1,
   pan: { x: 0, y: 0 },
   preview: false,
+  thermal: false,
   previewRow: 0,
   showData: true,
   printer: prefGet<Printer>('printer', 'none'),
@@ -119,6 +143,8 @@ export const useStore = create<State & Actions>()((set, get) => ({
   savedVersion: 0,
   dirty: false,
   fitRequest: 0,
+  promptAsk: null,
+  remoteRequest: null,
 
   async init() {
     const saved = await kvGet<{ doc: LabelDoc; past?: LabelDoc[]; future?: LabelDoc[]; previewRow?: number }>('current');
@@ -364,3 +390,6 @@ useStore.subscribe((s, prev) => {
 });
 
 export const selectedElements = (s: State) => s.doc.elements.filter((e) => s.selected.includes(e.id));
+
+// accès au store depuis la console en développement (débogage / vérifications)
+if (import.meta.env.DEV) (window as unknown as { __mlz?: typeof useStore }).__mlz = useStore;

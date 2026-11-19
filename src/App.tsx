@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Eye, EyeOff, Minus, Plus, ChevronLeft, ChevronRight, Type, Barcode, QrCode, Database, MoreHorizontal, Shapes, Image as ImageIcon, Layers, LayoutTemplate, Hash, CalendarDays, ScanLine, Table2, BoxSelect, Copy } from 'lucide-react';
+import { Eye, EyeOff, Contrast, Minus, Plus, ChevronLeft, ChevronRight, Type, Barcode, QrCode, Database, MoreHorizontal, Shapes, Image as ImageIcon, Layers, LayoutTemplate, Hash, CalendarDays, ScanLine, Table2, BoxSelect, Copy } from 'lucide-react';
 import { useStore } from './store';
 import { TopBar } from './components/TopBar';
 import { SetupBar } from './components/SetupBar';
@@ -8,12 +8,13 @@ import { RightBar } from './components/RightBar';
 import { Editor } from './components/Editor';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { ZplViewer } from './components/ZplViewer';
-import { SavedLabels, HelpModal, PrintDialog, ExportDialog, ZebraPanel, SheetsDialog, BarcodeTool, QrTool } from './components/Modals';
+import { SavedLabels, HelpModal, PrintDialog, ExportDialog, ZebraPanel, SheetsDialog, BarcodeTool, QrTool, PromptDialog, HistoryModal } from './components/Modals';
 import { Dropdown } from './components/ui';
 import { nudge } from './components/ContextMenu';
 import { t, onLangChange } from './i18n';
 import { addImageFile, addText, addQr, addBarcode, saveCurrent } from './actions';
 import { applyUrlParams } from './urlParams';
+import { applyRemoteUrl, installMessageApi } from './remote';
 import { BASE_DPI } from './types';
 import { pickFile } from './util';
 
@@ -22,12 +23,23 @@ const PHYS = 96 / BASE_DPI; // zoom correspondant à la taille réelle (100 %)
 function ZoomBar() {
   const zoom = useStore((s) => s.zoom);
   const preview = useStore((s) => s.preview);
+  const thermal = useStore((s) => s.thermal);
+  const dpi = useStore((s) => s.doc.dpi);
   const st = useStore.getState();
   const pct = Math.round((zoom / PHYS) * 100);
   return (
     <div className="zoombar pill" role="toolbar" aria-label={t('Zoom')}>
       <button className={'icon-btn flat sm' + (preview ? ' on' : '')} title={t('Mode aperçu (masque les outils)')} aria-label={t('Mode aperçu')} onClick={() => useStore.setState({ preview: !preview, selected: [], editingTextId: null })}>
         {preview ? <EyeOff size={16} /> : <Eye size={16} />}
+      </button>
+      <button
+        className={'icon-btn flat sm' + (thermal ? ' on' : '')}
+        title={t('Aperçu thermique : rendu noir et blanc tel que l’imprimante l’imprimera ({dpi} dpi)', { dpi })}
+        aria-label={t('Aperçu thermique')}
+        aria-pressed={thermal}
+        onClick={() => useStore.setState({ thermal: !thermal })}
+      >
+        <Contrast size={16} />
       </button>
       <button className="icon-btn flat sm" aria-label={t('Zoom arrière')} onClick={() => st.setZoom(zoom / 1.2)}>
         <Minus size={16} />
@@ -69,6 +81,32 @@ function RowBar() {
       <span style={{ fontSize: 12.5, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{t('Ligne {i} / {n}', { i: i + 1, n })}</span>
       <button className="btn sm flat" onClick={() => st.set('rightPanel', 'data')}>
         {t('Modifier')}
+      </button>
+    </div>
+  );
+}
+
+/** Bandeau de confirmation d'une impression demandée par un autre outil (lien / postMessage) */
+function RemoteBanner() {
+  const req = useStore((s) => s.remoteRequest);
+  const [remember, setRemember] = useState(false);
+  if (!req) return null;
+  return (
+    <div className="remote-banner pill" role="alertdialog" aria-label={t('Demande d’impression')}>
+      <div style={{ flex: 1, minWidth: 220 }}>
+        <b>{t('Demande d’impression')}</b> — {req.source === 'url' ? t('depuis un lien') : t('depuis {o}', { o: req.source })}
+        <div style={{ fontSize: 13 }}>
+          {t('{n} étiquette(s) « {d} » → {p}', { n: req.count, d: req.docName, p: t(req.target) })}
+        </div>
+        <label className="check" style={{ margin: '4px 0 0', fontSize: 12.5 }}>
+          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> {t('Autoriser l’impression automatique pour ce modèle (sans confirmation)')}
+        </label>
+      </div>
+      <button className="btn flat" onClick={() => (req.resolve(false, false), setRemember(false))}>
+        {t('Annuler')}
+      </button>
+      <button className="btn accent" onClick={() => (req.resolve(true, remember), setRemember(false))}>
+        {t('Imprimer')}
       </button>
     </div>
   );
@@ -271,7 +309,10 @@ export default function App() {
     useStore
       .getState()
       .init()
-      .then(() => applyUrlParams());
+      .then(() => {
+        installMessageApi();
+        if (!applyRemoteUrl()) applyUrlParams();
+      });
   }, []);
   useShortcuts();
   if (!ready) return null;
@@ -295,6 +336,9 @@ export default function App() {
       {modal === 'sheets' && <SheetsDialog />}
       {modal === 'tool-barcode' && <BarcodeTool />}
       {modal === 'tool-qr' && <QrTool />}
+      {modal === 'history' && <HistoryModal />}
+      <PromptDialog />
+      <RemoteBanner />
       <Toasts />
     </div>
   );

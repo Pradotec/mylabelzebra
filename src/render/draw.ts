@@ -1,9 +1,9 @@
 import { BASE_DPI, type LabelDoc, type LabelElement, type TextEl, type TableEl } from '../types';
 import { encodeBarcode, encodeQr, qrPayload, type MatrixCode } from './codes';
 import { getImage } from './images';
-import { resolveText, type ResolveCtx } from './resolve';
+import { resolveText, isPrinted, type ResolveCtx } from './resolve';
 import { shapeDef, drawSymbol } from './shapes';
-import { fontString, layoutText, hasFixedHeight, textOffsetY, justifyWords } from './textLayout';
+import { fontString, layoutText, hasFixedHeight, textOffsetY, justifyWords, richSegments } from './textLayout';
 
 export interface DrawCtx extends ResolveCtx {
   /** pixels de sortie par unité u */
@@ -84,7 +84,7 @@ function quoteFamily(f: string) {
 
 /** Hauteur effective d'un élément (le texte libre a une hauteur automatique). */
 export function elementHeight(el: LabelElement, rctx: ResolveCtx): number {
-  if (el.type === 'text' && !hasFixedHeight(el)) return layoutText(el, resolveText(el.text, rctx)).h;
+  if (el.type === 'text' && !hasFixedHeight(el)) return layoutText(el, resolveText(el.text, rctx), rctx.doc.allergensExtra).h;
   return el.h;
 }
 
@@ -237,7 +237,7 @@ export function drawElementFull(c: CanvasRenderingContext2D, el: LabelElement, r
 
 function drawText(c: CanvasRenderingContext2D, el: TextEl, rctx: DrawCtx) {
   const text = resolveText(el.text, rctx);
-  const L = layoutText(el, text);
+  const L = layoutText(el, text, rctx.doc.allergensExtra);
   const fg = el.invert ? (isDark(el.color) ? '#ffffff' : '#000000') : el.color;
   if (el.invert) {
     c.fillStyle = paint(c, el.color, rctx.mono);
@@ -258,6 +258,23 @@ function drawText(c: CanvasRenderingContext2D, el: TextEl, rctx: DrawCtx) {
   const oy = textOffsetY(el, L);
   L.lines.forEach((ln, i) => {
     const cy = oy + L.pad + i * L.lh + L.lh / 2;
+    if (ln.runs) {
+      // texte enrichi (allergènes en gras) : segments positionnés un par un
+      const boldFont = fontString({ ...el, bold: true }, L.fontSize);
+      c.textAlign = 'left';
+      const segs = richSegments(el, ln, L.fontSize, innerW);
+      for (const s of segs) {
+        c.font = s.bold ? boldFont : font;
+        c.fillText(s.text, L.pad + s.x, cy);
+      }
+      c.font = font;
+      if (el.underline && ln.text && segs.length) {
+        const sx = segs[0].x;
+        const tw = el.align === 'justify' && !ln.last ? innerW : Math.min(innerW, ln.width);
+        c.fillRect(L.pad + sx, cy + L.fontSize * 0.42, tw, Math.max(1, L.fontSize * 0.07));
+      }
+      return;
+    }
     const jw = el.align === 'justify' ? justifyWords(ln, font, innerW) : null;
     if (jw) {
       c.textAlign = 'left';
@@ -478,7 +495,7 @@ export function renderLabel(doc: LabelDoc, opts: RenderLabelOpts = {}) {
     mono: opts.mono,
   };
   for (const el of doc.elements) {
-    if (el.hidden) continue;
+    if (!isPrinted(el, rctx)) continue;
     if (opts.only && !opts.only(el)) continue;
     c.save();
     c.scale(sx, sy);

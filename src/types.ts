@@ -35,6 +35,15 @@ export type Symbology =
 export type QrLevel = 'L' | 'M' | 'Q' | 'H';
 export type CurveMode = 'none' | 'arcTop' | 'arcBottom' | 'circle';
 
+/** Condition d'affichage d'un élément, évaluée pour chaque ligne de données */
+export type CondOp = 'empty' | 'notEmpty' | 'eq' | 'ne' | 'contains';
+export interface ShowCondition {
+  /** colonne ou champ : « lot », « numero », « ?Lot »… (accolades facultatives) */
+  field: string;
+  op: CondOp;
+  value?: string;
+}
+
 interface Base {
   id: string;
   name?: string;
@@ -49,6 +58,8 @@ interface Base {
   hidden?: boolean;
   /** pile de groupes, du plus externe au plus interne */
   groups?: string[];
+  /** afficher seulement si… (optionnel) */
+  showIf?: ShowCondition;
 }
 
 export interface TextEl extends Base {
@@ -79,6 +90,8 @@ export interface TextEl extends Base {
   bend?: number;
   /** forcer le rendu en image dans le ZPL */
   zplAsImage?: boolean;
+  /** mettre les allergènes (INCO) en gras */
+  boldAllergens?: boolean;
 }
 
 export interface BarcodeEl extends Base {
@@ -211,6 +224,15 @@ export interface LabelDoc {
   /** nombre de copies pour « Imprimer » quand il n'y a pas de données */
   copies?: number;
   updatedAt?: number;
+  /** allergènes supplémentaires (mots mis en gras en plus de la liste INCO) */
+  allergensExtra?: string[];
+  /**
+   * Valeurs des champs à saisir à l'impression ({{?Nom}}) — renseignées sur la copie
+   * du document utilisée pour un travail d'impression (jamais sur le document édité).
+   */
+  promptValues?: Record<string, string>;
+  /** date de référence d'un travail (réimpression à l'identique) */
+  jobDate?: number;
 }
 
 export interface SavedLabel {

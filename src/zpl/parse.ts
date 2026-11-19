@@ -4,7 +4,8 @@
  * ^BQ ^BX ^GB ^GE ^GC ^GF(A, Z64) ^FX ^CI ^PQ (ignoré).
  */
 import type { LabelElement, Symbology, QrLevel } from '../types';
-import { encodeBarcode, encodeQr } from '../render/codes';
+import { encodeBarcode, encodeQr, encodeCode128Codewords } from '../render/codes';
+import { zplToCodewords, codewordsToGs1, codewordsText } from './code128';
 import { decodeGfaHex, decodeZ64, bitmapToCanvas, type Bitmap } from './gfa';
 import { uid } from '../util';
 
@@ -17,7 +18,7 @@ export type ZOp =
   | ({ k: 'text'; h: number; w: number; f: string; text: string; block?: { w: number; lines: number; spacing: number; just: string }; reverse: boolean } & Placed)
   | { k: 'box'; x: number; y: number; w: number; h: number; t: number; color: 'B' | 'W'; r: number; reverse: boolean }
   | { k: 'ellipse'; x: number; y: number; w: number; h: number; t: number; color: 'B' | 'W'; reverse: boolean }
-  | ({ k: 'barcode'; sym: Symbology; data: string; module: number; height: number; hr: boolean; reverse: boolean } & Placed)
+  | ({ k: 'barcode'; sym: Symbology; data: string; module: number; height: number; hr: boolean; reverse: boolean; raw?: number[] } & Placed)
   | ({ k: 'qr'; mag: number; data: string; level: QrLevel; reverse: boolean } & Placed)
   | { k: 'image'; x: number; y: number; bitmap: Bitmap; reverse: boolean };
 
@@ -177,9 +178,18 @@ export async function parseZpl(code: string): Promise<ZLabel[]> {
       case 'CF': {
         const f = (P[0] || cf.f).trim().toUpperCase()[0] || cf.f;
         const bmp = BITMAP_FONTS[f];
-        const h = num(1, bmp ? bmp[0] : cf.h);
-        const w = num(2, bmp ? (h / bmp[0]) * bmp[1] : h);
-        cf = { f, h, w };
+        if (bmp) {
+          // police bitmap : même arrondi au multiple de la matrice de base que ^A
+          const rh = num(1, NaN);
+          const rw = num(2, NaN);
+          const mh = Math.max(1, Math.round((Number.isFinite(rh) ? rh : bmp[0]) / bmp[0]));
+          const mw = Math.max(1, Math.round((Number.isFinite(rw) ? rw : Number.isFinite(rh) ? (rh / bmp[0]) * bmp[1] : bmp[1]) / bmp[1]));
+          cf = { f, h: bmp[0] * mh, w: bmp[1] * mw };
+        } else {
+          const h = num(1, cf.h);
+          const w = num(2, h);
+          cf = { f, h, w };
+        }
         break;
       }
       case 'FW':
@@ -286,9 +296,23 @@ export async function parseZpl(code: string): Promise<ZLabel[]> {
               L().ops.push({ k: 'barcode', x: fx, y: fy, o: bc.o, ft, sym: 'datamatrix', data: text, module: bc.mag || 4, height: 0, hr: false, reverse: fr || lr });
             } else {
               let d = text;
-              if (bc.sym === 'code128') d = d.replace(/>[0-9:;<=>]/g, '');
+              let sym = bc.sym;
+              let raw: number[] | undefined;
+              // ^BC mode N avec codes d'invocation (>; >8 …) : mots de code exacts ; un FNC1
+              // en tête = GS1-128, reconstruit en « (AI)valeur » quand la structure est reconnue
+              const cw = bc.sym === 'code128' ? zplToCodewords(d) : null;
+              if (cw) {
+                const gs1 = codewordsToGs1(cw);
+                if (gs1 && encodeBarcode(gs1, 'gs1-128').error === undefined) {
+                  sym = 'gs1-128';
+                  d = gs1;
+                } else {
+                  raw = cw;
+                  d = codewordsText(cw);
+                }
+              } else if (bc.sym === 'code128') d = d.replace(/>[0-9:;<=>]/g, '');
               const h = bc.h || by.h;
-              L().ops.push({ k: 'barcode', x: fx, y: fy, o: bc.o, ft, sym: bc.sym, data: d, module: by.m, height: h, hr: bc.hr, reverse: fr || lr });
+              L().ops.push({ k: 'barcode', x: fx, y: fy, o: bc.o, ft, sym, data: d, module: by.m, height: h, hr: bc.hr, reverse: fr || lr, raw });
             }
           } else {
             const f = font || { ...cf, o: fw };
@@ -367,7 +391,7 @@ function fieldBox(c: CanvasRenderingContext2D, op: Extract<ZOp, Placed>): { lw: 
       return { lw, lh: step * (lines.length - 1) + op.h, base: step * (lines.length - 1) + op.h * 0.78 };
     }
     case 'barcode': {
-      const enc = encodeBarcode(op.data, op.sym);
+      const enc = op.raw ? encodeCode128Codewords(op.raw, op.data) : encodeBarcode(op.data, op.sym);
       if (enc.error !== undefined) return { lw: 300, lh: op.height || 40, base: op.height || 40 };
       if (enc.kind === 'matrix') return { lw: enc.cols * op.module, lh: enc.rows * op.module, base: enc.rows * op.module };
       const hr = op.hr ? hrSize(op.module) * 1.2 : 0;
@@ -493,7 +517,7 @@ export function renderZplLabel(label: ZLabel, W: number, H: number): HTMLCanvasE
           for (let r = 0; r < q.rows; r++) for (let k = 0; k < q.cols; k++) if (q.get(r, k)) c.fillRect(k * op.mag, r * op.mag, op.mag, op.mag);
           break;
         }
-        const enc = encodeBarcode(op.data, op.sym);
+        const enc = op.raw ? encodeCode128Codewords(op.raw, op.data) : encodeBarcode(op.data, op.sym);
         if (enc.error !== undefined) {
           c.globalCompositeOperation = 'source-over';
           c.fillStyle = '#c53030';
@@ -580,7 +604,8 @@ export function zplLabelToElements(label: ZLabel, ds: number): LabelElement[] {
       case 'box': {
         const filled = op.t * 2 >= Math.min(op.w, op.h);
         const c = op.reverse || op.color === 'W' ? '#ffffff' : '#000000';
-        const thin = Math.min(op.w, op.h) <= op.t && filled;
+        // seule une boîte pleine vraiment fine (trait) devient une ligne
+        const thin = filled && Math.min(op.w, op.h) <= Math.max(3, op.t) && Math.max(op.w, op.h) > 4 * Math.min(op.w, op.h);
         els.push({
           ...base,
           type: 'shape',

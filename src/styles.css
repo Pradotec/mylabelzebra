@@ -943,3 +943,56 @@ input[type='range'] {
     padding: 6px 14px 16px;
   }
 }
+
+/* badge « élément conditionnel » (calques) */
+.cond-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* historique d'impression */
+.history-table td:last-child {
+  max-width: none;
+  overflow: visible;
+}
+.history-table td {
+  max-width: 200px;
+}
+.history-table tr:hover td {
+  cursor: default;
+}
+
+/* assistants GS1 / EAN variable */
+.gs1-row {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px;
+  margin-bottom: 6px;
+}
+
+/* bandeau « demande d'impression » (lien / postMessage) */
+.remote-banner {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 16px;
+  max-width: min(680px, calc(100vw - 32px));
+  background: #fff;
+  border: 2px solid var(--accent);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(22, 33, 62, 0.25);
+}

@@ -4,6 +4,8 @@ import {
   isDark,
   isGrey,
   isNone,
+  luminance,
+  col,
   labelSizeDots,
   layoutText,
   linearGeometry,
@@ -12,10 +14,11 @@ import {
   tableRows,
 } from '../render/draw';
 import { encodeBarcode, encodeQr, normalizeBarcode, qrPayload } from '../render/codes';
-import { batchJobs, resolveText, type ResolveCtx } from '../render/resolve';
+import { batchJobs, resolveText, isPrinted, type ResolveCtx } from '../render/resolve';
 import { shapeDef } from '../render/shapes';
 import { bitmapToGfa, blackBounds, canvasToBitmap } from './gfa';
-import { textOffsetY } from '../render/textLayout';
+import { sbsToCodewords, codewordsToZpl } from './code128';
+import { textOffsetY, hasRichRuns } from '../render/textLayout';
 
 /** Échappement ^FH : _XX hexadécimal */
 export function fd(s: string): string {
@@ -32,6 +35,8 @@ const NATIVE_BARCODES = new Set(['code128', 'gs1-128', 'sscc18', 'ean13', 'ean8'
 function isLight(c: string) {
   return !isDark(c);
 }
+/** Codes-barres / QR : même seuil que l'écran (inkColor) — blanc seulement à partir de 225 */
+const inkIsWhite = (c: string) => !isNone(c) && luminance(col(c)) >= 225;
 
 /** L'élément doit-il être rendu en image (^GFA) ? */
 const ZPL_SAFE_FONTS = /^(arial|helvetica|arial narrow|verdana|tahoma|segoe ui|trebuchet ms|consolas)$/i;
@@ -62,7 +67,9 @@ export function needsRaster(el: LabelElement, rctx?: ResolveCtx): boolean {
     case 'text': {
       if (el.zplAsImage || el.italic || (!!el.curve && el.curve !== 'none') || el.align === 'justify' || !ZPL_SAFE_FONTS.test(el.fontFamily)) return true;
       if (!rctx) return false;
-      const L = layoutText(el, resolveText(el.text, rctx));
+      const L = layoutText(el, resolveText(el.text, rctx), rctx.doc.allergensExtra);
+      // segments gras (allergènes) : une commande ^A ne change pas de graisse en cours de ligne
+      if (hasRichRuns(L)) return true;
       const innerW = el.w - L.pad * 2;
       return L.truncated || L.lines.some((l) => l.width > innerW * 0.88 || /[^\u0000-\u024F\u20AC]/.test(l.text));
     }
@@ -97,7 +104,7 @@ export function generateLabelZpl(doc: LabelDoc, opts: ZplOptions = {}): string {
   const D = (v: number) => Math.max(0, Math.round(v * ds));
   const rctx: ResolveCtx = { doc, index, row: doc.data?.rows[index], resolve: true };
   const out: string[] = ['^XA', '^CI28', `^PW${W}`, `^LL${H}`, '^LH0,0'];
-  const visible = doc.elements.filter((e) => !e.hidden);
+  const visible = doc.elements.filter((e) => isPrinted(e, rctx));
 
   // fond gris → tout en image (trame) ; seul un fond quasi noir reste un ^GB natif
   const bgDark = !isNone(doc.background) && isDark(doc.background) && !isGrey(doc.background);
@@ -143,7 +150,7 @@ function elementIsLight(el: LabelElement) {
       return el.invert ? false : isLight(el.color);
     case 'barcode':
     case 'qr':
-      return isLight(el.color);
+      return inkIsWhite(el.color);
     case 'shape':
       return isNone(el.fill) ? !isNone(el.stroke) && isLight(el.stroke) : isLight(el.fill);
     default:
@@ -185,7 +192,7 @@ function font(h: number) {
 
 function nativeText(el: TextEl, rctx: ResolveCtx, D: (v: number) => number): string[] {
   const text = resolveText(el.text, rctx);
-  const L = layoutText(el, text);
+  const L = layoutText(el, text, rctx.doc.allergensExtra);
   const out: string[] = [];
   const reverse = el.invert || isLight(el.color);
   if (el.invert) out.push(`^FO${D(el.x)},${D(el.y)}^GB${D(el.w)},${D(L.h)},${D(Math.min(el.w, L.h))},${isLight(el.color) ? 'W' : 'B'},0^FS`);
@@ -207,7 +214,7 @@ function nativeBarcode(el: BarcodeEl, rctx: ResolveCtx, D: (v: number) => number
   const enc = encodeBarcode(value, el.symbology);
   const n = normalizeBarcode(value, el.symbology);
   if (enc.error !== undefined || 'error' in n) return [];
-  const fr = isLight(el.color) ? '^FR' : '';
+  const fr = inkIsWhite(el.color) ? '^FR' : '';
   if (enc.kind === 'matrix') {
     const mDots = Math.max(1, Math.floor(Math.min(el.w / enc.cols, el.h / enc.rows) * ds));
     return [`^FO${D(el.x)},${D(el.y)}^BXN,${mDots},200${fr}^FH^FD${fd(n.data)}^FS`];
@@ -224,9 +231,19 @@ function nativeBarcode(el: BarcodeEl, rctx: ResolveCtx, D: (v: number) => number
       cmd = `^BCN,${barH},${hr},N,N,A`;
       break;
     case 'gs1-128':
-    case 'sscc18':
+    case 'sscc18': {
+      // mêmes mots de code que l'écran (bwip-js) : départ, changements de jeu et FNC1 (>8)
+      // explicites en mode N ; texte lisible « (AI)… » envoyé en image, placé comme à l'écran
+      const cw = sbsToCodewords(enc.sbs);
+      const z = cw ? codewordsToZpl(cw.slice(0, -1)) : null;
+      if (z) {
+        const out = [`${pos}^BCN,${barH},N,N,N,N${fr}^FH^FD${fd(z)}^FS`];
+        if (el.showText) out.push(humanReadableGfa(el, enc.text, g, rctx, fr));
+        return out.filter(Boolean);
+      }
       cmd = `^BCN,${barH},${hr},N,N,D`;
       break;
+    }
     case 'ean13':
       cmd = `^BEN,${barH},${hr},N`;
       data = data.slice(0, 12);
@@ -252,12 +269,35 @@ function nativeBarcode(el: BarcodeEl, rctx: ResolveCtx, D: (v: number) => number
   return [`${pos}${cmd}${fr}^FH^FD${fd(data)}^FS`];
 }
 
+/** Texte lisible d'un code linéaire, en image ^GFA (même police et même position qu'à l'écran) */
+function humanReadableGfa(el: BarcodeEl, text: string, g: { ox: number; total: number }, rctx: ResolveCtx, fr: string): string {
+  const { W, H } = labelSizeDots(rctx.doc);
+  const ds = dpiScale(rctx.doc);
+  const cv = document.createElement('canvas');
+  cv.width = W;
+  cv.height = H;
+  const c = cv.getContext('2d', { willReadFrequently: true })!;
+  c.fillStyle = '#ffffff';
+  c.fillRect(0, 0, W, H);
+  c.scale(ds, ds);
+  c.translate(el.x, el.y);
+  const barH = Math.max(4, el.h - el.fontSize * 1.15);
+  c.fillStyle = '#000000';
+  c.font = `${el.fontSize}px Arial, Helvetica, sans-serif`;
+  c.textAlign = 'center';
+  c.textBaseline = 'top';
+  c.fillText(text, g.ox + g.total / 2, barH + el.fontSize * 0.1);
+  const bm = canvasToBitmap(cv);
+  const b = blackBounds(bm);
+  return b ? `^FO${b.x},${b.y}${fr}${bitmapToGfa(bm, b)}^FS` : '';
+}
+
 function nativeQr(el: QrEl, rctx: ResolveCtx, D: (v: number) => number, ds: number): string[] {
   const value = resolveText(qrPayload(el), rctx);
   const q = encodeQr(value, el.level);
   if (q.error !== undefined) return [];
   const mag = Math.max(1, Math.floor(Math.min(el.w / q.cols, el.h / q.rows) * ds));
-  const fr = isLight(el.color) ? '^FR' : '';
+  const fr = inkIsWhite(el.color) ? '^FR' : '';
   return [`^FO${D(el.x)},${D(el.y)}^BQN,2,${Math.min(10, mag)}${fr}^FH^FD${el.level}A,${fd(value)}^FS`];
 }
 
@@ -325,6 +365,11 @@ function nativeTable(el: TableEl, rctx: ResolveCtx, D: (v: number) => number): s
     y0 += rh[r];
   }
   return out;
+}
+
+/** ZPL d'une liste d'étiquettes (travail d'impression) */
+export function generateJobsZpl(doc: LabelDoc, jobs: { index: number; copies: number }[]): string {
+  return jobs.map((j) => generateLabelZpl(doc, { index: j.index, copies: j.copies })).join('\n');
 }
 
 /** ZPL pour tout le lot (lignes cochées / série) */

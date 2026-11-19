@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Type, Barcode, QrCode, Image as ImageIcon, Shapes, Table2, LayoutTemplate, Layers, Eye, EyeOff, Lock, Unlock, Trash2, GripVertical, Search, Wifi, Contact, Link } from 'lucide-react';
+import { Type, Barcode, QrCode, Image as ImageIcon, Shapes, Table2, LayoutTemplate, Layers, Eye, EyeOff, Lock, Unlock, Trash2, GripVertical, Search, Wifi, Contact, Link, Filter } from 'lucide-react';
 import { useStore, type LeftPanel } from '../store';
 import { Panel, Modal } from './ui';
 import { t } from '../i18n';
@@ -243,6 +243,11 @@ function LayersPanel() {
               {el.groups?.length ? <span style={{ color: 'var(--accent)' }}>▣ </span> : null}
               {elementLabel(el)}
             </span>
+            {el.showIf?.field && (
+              <span className="cond-badge" title={t('Affiché seulement si : {f}', { f: el.showIf.field })} aria-label={t('Élément conditionnel')}>
+                <Filter size={11} /> {t('si')}
+              </span>
+            )}
             <button className="icon-btn flat sm" title={el.hidden ? t('Afficher') : t('Masquer')} aria-label={el.hidden ? t('Afficher') : t('Masquer')} onClick={(e) => (e.stopPropagation(), st.updateEls([el.id], { hidden: !el.hidden }))}>
               {el.hidden ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>

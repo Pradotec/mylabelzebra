@@ -4,8 +4,10 @@ import type Konva from 'konva';
 import { useStore } from '../store';
 import type { LabelElement, TableEl } from '../types';
 import { BASE_DPI } from '../types';
-import { renderElementCanvas, elementHeight, hasFixedHeight, tableColumns, tableRows, fontString, type DrawCtx } from '../render/draw';
+import { renderElementCanvas, elementHeight, hasFixedHeight, tableColumns, tableRows, fontString, renderLabel, labelSizeDots, type DrawCtx } from '../render/draw';
 import { shapeDef } from '../render/shapes';
+import { conditionHolds } from '../render/resolve';
+import { promptsVersion, onPromptsChange } from '../prompts';
 import { ContextMenu, type CtxMenuState } from './ContextMenu';
 import { t } from '../i18n';
 
@@ -113,6 +115,7 @@ export function Editor() {
   const editingTextId = useStore((s) => s.editingTextId);
   const fitRequest = useStore((s) => s.fitRequest);
   const rightPanel = useStore((s) => s.rightPanel);
+  const thermal = useStore((s) => s.thermal);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
@@ -174,7 +177,9 @@ export function Editor() {
     () => ({ doc, index: previewRow, row: doc.data?.rows[previewRow], resolve, scale: pixelScale, screen: !preview }),
     [doc, previewRow, resolve, pixelScale, preview],
   );
-  const ctxKey = `${pixelScale}|${resolve}|${previewRow}|${imgVersion}|${doc.dpi}|${refId(doc.numbering)}|${refId(doc.date)}|${refId(doc.data)}|${doc.background}|${preview}`;
+  const [pv, setPv] = useState(promptsVersion());
+  useEffect(() => onPromptsChange(() => setPv(promptsVersion())), []);
+  const ctxKey = `${pv}|${pixelScale}|${resolve}|${previewRow}|${imgVersion}|${doc.dpi}|${refId(doc.numbering)}|${refId(doc.date)}|${refId(doc.data)}|${doc.background}|${preview}`;
 
   const rendered = useMemo(() => {
     const out = new Map<string, Cached>();
@@ -191,6 +196,18 @@ export function Editor() {
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc.elements, ctxKey]);
+
+  // aperçu thermique : même chemin que le ZPL (rendu mono à la résolution de l'imprimante,
+  // gris tramés en Bayer, codes en noir pur)
+  const thermalCanvas = useMemo(() => {
+    if (!thermal) return null;
+    try {
+      return renderLabel(doc, { index: previewRow, mono: true, pixelSize: labelSizeDots(doc) });
+    } catch {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thermal, doc, previewRow, imgVersion, pv]);
 
   const heightOf = (el: LabelElement) => rendered.get(el.id)?.h ?? elementHeight(el, rctx);
 
@@ -648,7 +665,7 @@ export function Editor() {
         onWheel={onWheel}
         onContextMenu={onContextMenu}
       >
-        <Layer>
+        <Layer imageSmoothingEnabled={!thermalCanvas}>
           <Group x={ox} y={oy}>
             {doc.round ? (
               <Ellipse x={(W * zoom) / 2} y={(H * zoom) / 2} radiusX={(W * zoom) / 2} radiusY={(H * zoom) / 2} fill={doc.background || '#fff'} shadowColor="#16213e" shadowBlur={24} shadowOpacity={0.14} shadowOffsetY={6} />
@@ -676,6 +693,9 @@ export function Editor() {
               if (el.hidden) return null;
               const r = rendered.get(el.id);
               if (!r) return null;
+              // condition d'affichage non remplie pour cette ligne : masqué en aperçu, estompé sinon
+              const off = resolve && !!el.showIf && !conditionHolds(el.showIf, rctx);
+              if (off && preview) return null;
               return (
                 <KImage
                   key={el.id}
@@ -687,11 +707,12 @@ export function Editor() {
                   height={r.h}
                   rotation={el.rotation}
                   image={r.canvas}
-                  opacity={editingTextId === el.id ? 0.15 : 1}
+                  opacity={thermalCanvas ? 0 : editingTextId === el.id ? 0.15 : off ? 0.18 : 1}
                   perfectDrawEnabled={false}
                 />
               );
             })}
+            {thermalCanvas && <KImage image={thermalCanvas} x={0} y={0} width={W} height={H} listening={false} />}
           </Group>
           {!preview && (
             <Group x={ox} y={oy} scaleX={zoom} scaleY={zoom} listening={false}>

@@ -49,6 +49,28 @@ export function gs1Check(digits: string): number {
   return (10 - (sum % 10)) % 10;
 }
 
+/** UPC-E (chiffre de système + 6 chiffres) → les 11 chiffres UPC-A correspondants (sans clé) */
+export function upceToUpca(e7: string): string {
+  const ns = e7[0];
+  const d = e7.slice(1, 7);
+  const last = +d[5];
+  if (last <= 2) return ns + d[0] + d[1] + d[5] + '0000' + d[2] + d[3] + d[4];
+  if (last === 3) return ns + d[0] + d[1] + d[2] + '00000' + d[3] + d[4];
+  if (last === 4) return ns + d[0] + d[1] + d[2] + d[3] + '00000' + d[4];
+  return ns + d.slice(0, 5) + '0000' + d[5];
+}
+
+// Clé de contrôle « prix » des EAN-13 à prix variable (GS1, champ prix de 4 chiffres) :
+// pondérations 2-, 2-, 3, 5- ; somme × 3, chiffre des unités.
+const W2M = [0, 2, 4, 6, 8, 9, 1, 3, 5, 7];
+const W3 = [0, 3, 6, 9, 2, 5, 8, 1, 4, 7];
+const W5M = [0, 5, 9, 4, 8, 3, 7, 2, 6, 1];
+export function priceCheck4(price: string): number {
+  const d = price.padStart(4, '0').slice(-4).split('').map(Number);
+  const sum = W2M[d[0]] + W2M[d[1]] + W3[d[2]] + W5M[d[3]];
+  return (sum * 3) % 10;
+}
+
 /** Normalise la saisie et renvoie [texte pour bwip, texte lisible] ou une erreur. */
 export function normalizeBarcode(value: string, s: Symbology): { data: string; human: string } | CodeError {
   const v = value.trim();
@@ -69,7 +91,11 @@ export function normalizeBarcode(value: string, s: Symbology): { data: string; h
       return { data: v.slice(0, 11) + gs1Check(v.slice(0, 11)), human: v.slice(0, 11) + gs1Check(v.slice(0, 11)) };
     case 'upce':
       if (!digits || v.length < 7 || v.length > 8 || (v[0] !== '0' && v[0] !== '1')) return bad(t('UPC-E invalide : 7 chiffres commençant par 0 ou 1'));
-      return { data: v.slice(0, 7), human: v };
+      {
+        const ck = gs1Check(upceToUpca(v.slice(0, 7)));
+        if (v.length === 8 && ck !== +v[7]) return bad(t('UPC-E : clé de contrôle incorrecte'));
+        return { data: v.slice(0, 7), human: v.slice(0, 7) + ck };
+      }
     case 'interleaved2of5':
       if (!digits) return bad(t('ITF invalide : chiffres uniquement'));
       if (v.length % 2) return bad(t('ITF : nombre pair de chiffres requis'));
@@ -124,11 +150,38 @@ export function encodeBarcode(value: string, s: Symbology): Encoded {
           res = { kind: 'linear', sbs: r.sbs, modules: r.sbs.reduce((a, b) => a + b, 0), text: n.human };
         }
       } catch (e) {
-        res = { error: t('Valeur invalide pour {s}', { s: SYMBOLOGIES.find((x) => x.id === s)?.label ?? s }) };
+        res = { error: gs1Error(String((e as Error)?.message ?? e)) ?? t('Valeur invalide pour {s}', { s: SYMBOLOGIES.find((x) => x.id === s)?.label ?? s }) };
       }
     }
   }
   if (cache.size > 600) cache.clear();
+  cache.set(key, res);
+  return res;
+}
+
+/** Message d'erreur lisible pour les contrôles GS1 de bwip-js (clé, longueur, caractères) */
+function gs1Error(msg: string): string | null {
+  const ai = /AI (\d+)/.exec(msg)?.[1];
+  if (/badCheck|checksum|check digit/i.test(msg)) return ai ? t('GS1 : clé de contrôle incorrecte pour l’AI ({ai})', { ai }) : t('GS1 : clé de contrôle incorrecte');
+  if (/tooShort|tooLong|length/i.test(msg) && ai) return t('GS1 : longueur incorrecte pour l’AI ({ai})', { ai });
+  if (/badCharacter|invalid char|bad char/i.test(msg) && ai) return t('GS1 : caractère non autorisé dans l’AI ({ai})', { ai });
+  if (/unknownAI|unrecognised AI|unknown AI/i.test(msg)) return t('GS1 : identifiant d’application (AI) inconnu');
+  if (/GS1/.test(msg) && ai) return t('GS1 : valeur invalide pour l’AI ({ai})', { ai });
+  return null;
+}
+
+/** Code 128 à partir de mots de code explicites (départ + données, sans clé) — visionneuse ZPL */
+export function encodeCode128Codewords(cw: number[], text: string): Encoded {
+  const key = 'cw:' + cw.join(',');
+  const hit = cache.get(key);
+  if (hit) return hit;
+  let res: Encoded;
+  try {
+    const r = bwipjs.raw('code128', cw.map((v) => '^' + String(v).padStart(3, '0')).join(''), { raw: true } as never)[0] as unknown as { sbs: number[] };
+    res = { kind: 'linear', sbs: r.sbs, modules: r.sbs.reduce((a, b) => a + b, 0), text };
+  } catch {
+    res = { error: t('Valeur invalide pour {s}', { s: 'CODE 128' }) };
+  }
   cache.set(key, res);
   return res;
 }
