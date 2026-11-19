@@ -82,7 +82,14 @@ interface TableDrag {
   index: number;
   pos: number;
 }
-type Interaction = DragState | MarqueeState | GuideDrag | TableDrag | null;
+/** déplacement de la vue (outil Main, Espace maintenu ou clic molette) */
+interface PanDrag {
+  kind: 'pan';
+  sx: number;
+  sy: number;
+  pan0: { x: number; y: number };
+}
+type Interaction = DragState | MarqueeState | GuideDrag | TableDrag | PanDrag | null;
 
 /** Zone de l'écran non couverte par les barres et panneaux flottants (px écran). */
 function freeArea(w: number, h: number, rightOpen: boolean, preview: boolean) {
@@ -118,6 +125,7 @@ export function Editor() {
   const fitRequest = useStore((s) => s.fitRequest);
   const rightPanel = useStore((s) => s.rightPanel);
   const thermal = useStore((s) => s.thermal);
+  const handActive = useStore((s) => s.hand || s.spaceHand);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
@@ -321,6 +329,10 @@ export function Editor() {
     const move = (e: PointerEvent) => {
       const cur = interRef.current;
       if (!cur) return;
+      if (cur.kind === 'pan') {
+        useStore.setState({ pan: { x: cur.pan0.x + e.clientX - cur.sx, y: cur.pan0.y + e.clientY - cur.sy } });
+        return;
+      }
       const p = toLabel(e.clientX, e.clientY);
       if (cur.kind === 'move') {
         let dx = p.x - cur.start.x;
@@ -441,6 +453,8 @@ export function Editor() {
       const sx = e.clientX,
         sy = e.clientY;
       window.clearTimeout(longPress.current);
+      // outil Main : un doigt déplace la vue, pas de menu contextuel à l'appui long
+      if (useStore.getState().hand || useStore.getState().spaceHand) return;
       longPress.current = window.setTimeout(() => {
         const p = touches.current.get(e.pointerId);
         if (p && Math.hypot(p.x - sx, p.y - sy) < 10 && touches.current.size === 1) {
@@ -473,8 +487,17 @@ export function Editor() {
   const lastDown = useRef({ id: '', t: 0 });
   // ---- événements Konva ----
   const onStageDown = (e: Konva.KonvaEventObject<PointerEvent>) => {
-    if (preview || pinch.current) return;
-    if ((e.evt as PointerEvent).button === 2) return;
+    if (pinch.current) return;
+    const btn = (e.evt as PointerEvent).button;
+    // clic molette (quel que soit l'outil) ou outil Main : déplacement de la vue, sans sélection
+    if (btn === 1 || (btn === 0 && handActive)) {
+      e.evt.preventDefault();
+      setCtxMenu(null);
+      begin({ kind: 'pan', sx: e.evt.clientX, sy: e.evt.clientY, pan0: useStore.getState().pan });
+      return;
+    }
+    if (preview) return;
+    if (btn === 2) return;
     setCtxMenu(null);
     const target = e.target;
     if (target.getParent()?.className === 'Transformer') return;
@@ -687,7 +710,15 @@ export function Editor() {
     <div
       ref={wrapRef}
       className="stage-wrap"
-      style={{ touchAction: 'none', cursor: inter?.kind === 'guide' ? (inter.axis === 'x' ? 'ew-resize' : 'ns-resize') : undefined }}
+      style={{ touchAction: 'none', cursor: inter?.kind === 'pan' ? 'grabbing' : inter?.kind === 'guide' ? (inter.axis === 'x' ? 'ew-resize' : 'ns-resize') : handActive ? 'grab' : undefined }}
+      data-hand={handActive ? '' : undefined}
+      onMouseDown={(e) => {
+        // empêche le défilement automatique du clic molette
+        if (e.button === 1) e.preventDefault();
+        // le canevas reprend le clavier (Espace / H) plutôt qu'un bouton cliqué auparavant
+        const a = document.activeElement;
+        if (a instanceof HTMLButtonElement || (a instanceof HTMLInputElement && a.type === 'range')) a.blur();
+      }}
       onPointerDownCapture={onPointerDownCapture}
       onPointerMoveCapture={onPointerMoveCapture}
       onPointerUpCapture={onPointerUpCapture}
@@ -814,7 +845,7 @@ export function Editor() {
                   listening={false}
                 />
               )}
-              {singleTable && <TableHandles el={singleTable} zoom={zoom} drag={inter?.kind === 'table' ? inter : null} />}
+              {singleTable && !handActive && <TableHandles el={singleTable} zoom={zoom} drag={inter?.kind === 'table' ? inter : null} />}
             </Group>
           )}
           {!preview && grid.rulers && (
@@ -830,6 +861,7 @@ export function Editor() {
           <Transformer
             ref={trRef}
             visible={!preview}
+            listening={!handActive}
             rotateEnabled
             rotationSnaps={[0, 45, 90, 135, 180, 225, 270, 315]}
             rotationSnapTolerance={4}

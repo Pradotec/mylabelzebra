@@ -54,6 +54,10 @@ interface State {
   selected: string[];
   zoom: number;
   pan: { x: number; y: number };
+  /** outil « Main » (déplacement de la vue) verrouillé, bascule par H ou le bouton */
+  hand: boolean;
+  /** main temporaire tant que la barre d'espace est maintenue */
+  spaceHand: boolean;
   preview: boolean;
   /** aperçu thermique : rendu monochrome à la résolution de l'imprimante */
   thermal: boolean;
@@ -190,6 +194,8 @@ export const useStore = create<State & Actions>()((set, get) => ({
   selected: [],
   zoom: 1,
   pan: { x: 0, y: 0 },
+  hand: false,
+  spaceHand: false,
   preview: false,
   thermal: false,
   previewRow: 0,

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Eye, EyeOff, Contrast, Minus, Plus, ChevronLeft, ChevronRight, Type, Barcode, QrCode, Database, MoreHorizontal, Shapes, Image as ImageIcon, Layers, LayoutTemplate, Hash, CalendarDays, ScanLine, Table2, BoxSelect, Copy } from 'lucide-react';
+import { Eye, EyeOff, Contrast, Hand, Minus, Plus, ChevronLeft, ChevronRight, Type, Barcode, QrCode, Database, MoreHorizontal, Shapes, Image as ImageIcon, Layers, LayoutTemplate, Hash, CalendarDays, ScanLine, Table2, BoxSelect, Copy } from 'lucide-react';
 import { useStore, lastCopiedSystemText } from './store';
 import { isQuotaError, storageErrorMessage } from './storage';
 import { ProgressOverlay } from './components/Progress';
@@ -29,6 +29,8 @@ function ZoomBar() {
   const preview = useStore((s) => s.preview);
   const thermal = useStore((s) => s.thermal);
   const dpi = useStore((s) => s.doc.dpi);
+  const hand = useStore((s) => s.hand);
+  const spaceHand = useStore((s) => s.spaceHand);
   const st = useStore.getState();
   const pct = Math.round((zoom / PHYS) * 100);
   return (
@@ -44,6 +46,17 @@ function ZoomBar() {
         onClick={() => useStore.setState({ thermal: !thermal })}
       >
         <Contrast size={16} />
+      </button>
+      <button
+        className={'icon-btn flat sm' + (hand || spaceHand ? ' on' : '')}
+        title={t('Déplacer la vue (H, ou maintenir Espace)')}
+        aria-label={t('Déplacer la vue (H, ou maintenir Espace)')}
+        aria-pressed={hand}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => useStore.setState({ hand: !useStore.getState().hand })}
+        onDoubleClick={() => useStore.setState((s) => ({ fitRequest: s.fitRequest + 1 }))}
+      >
+        <Hand size={16} />
       </button>
       <button className="icon-btn flat sm" aria-label={t('Zoom arrière')} onClick={() => st.setZoom(zoom / 1.2)}>
         <Minus size={16} />
@@ -235,6 +248,18 @@ function useShortcuts() {
       if (st.modal) return;
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();
+      // outil Main : Espace maintenu (temporaire), H (bascule), V (retour à la sélection)
+      if (!st.editingTextId && !mod && !e.altKey) {
+        if (e.code === 'Space' || k === ' ') {
+          // Espace sur un bouton / lien focalisé garde son action d'origine
+          if (isInteractiveTarget(tg)) return;
+          e.preventDefault(); // pas de défilement de la page
+          if (!st.spaceHand) useStore.setState({ spaceHand: true });
+          return;
+        }
+        if (k === 'h' && !e.repeat) return e.preventDefault(), useStore.setState({ hand: !st.hand });
+        if (k === 'v' && !e.repeat) return st.hand ? (e.preventDefault(), useStore.setState({ hand: false })) : undefined;
+      }
       if (mod && k === 'z' && !e.shiftKey) return e.preventDefault(), st.undo();
       if (mod && (k === 'y' || (k === 'z' && e.shiftKey))) return e.preventDefault(), st.redo();
       if (mod && k === 'c') return st.selected.length ? (e.preventDefault(), st.copySelected()) : undefined;
@@ -255,6 +280,7 @@ function useShortcuts() {
       if (k === 'delete' || k === 'backspace') return st.selected.length ? (e.preventDefault(), st.removeSelected()) : undefined;
       if (k === 'escape') {
         if (st.preview) return useStore.setState({ preview: false });
+        if (st.hand) return useStore.setState({ hand: false });
         return useStore.setState({ selected: [], leftPanel: null, rightPanel: null });
       }
       // Entrée sur un bouton / lien focalisé : action du bouton, pas d'édition du texte sélectionné
@@ -343,12 +369,21 @@ function useShortcuts() {
       e.preventDefault();
       useStore.getState().toast(storageErrorMessage(e.reason), 'error');
     };
+    // fin de la main temporaire : Espace relâché ou fenêtre quittée pendant l'appui
+    const endSpace = (e: KeyboardEvent | FocusEvent) => {
+      if (e instanceof KeyboardEvent && e.code !== 'Space' && e.key !== ' ') return;
+      if (useStore.getState().spaceHand) useStore.setState({ spaceHand: false });
+    };
+    window.addEventListener('keyup', endSpace);
+    window.addEventListener('blur', endSpace);
     window.addEventListener('unhandledrejection', onRejection);
     window.addEventListener('keydown', onKey);
     window.addEventListener('paste', onPaste);
     window.addEventListener('dragover', onDragOver);
     window.addEventListener('drop', onDrop);
     return () => {
+      window.removeEventListener('keyup', endSpace);
+      window.removeEventListener('blur', endSpace);
       window.removeEventListener('unhandledrejection', onRejection);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('paste', onPaste);

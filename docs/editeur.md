@@ -11,9 +11,9 @@
 | Barre de gauche | **Texte**, **Code-barres**, **QR**, **Image**, **Forme**, **Tableau**, **Modèles**, **Calques**, **Transport** |
 | Barre de droite | **Données**, **Numéro**, **Date**, **Visionneuse ZPL** |
 | Panneau de propriétés | propriétés de la sélection ; sans sélection, panneau **Étiquette** (estampille, signe ℮, pictogrammes, conformité alimentaire, étiquettes de front sur le rouleau) |
-| En bas | barre des lignes de données (case « imprimer cette ligne », curseur, *Modifier*) ; barre de zoom (mode aperçu 👁, **aperçu thermique**, zoom, 100 %) |
+| En bas | barre des lignes de données (case « imprimer cette ligne », curseur, *Modifier*) ; barre de zoom (mode aperçu 👁, **aperçu thermique**, **outil Main**, zoom, 100 %) |
 
-Sur téléphone et tablette, une barre inférieure propose Texte, Code-barres, QR, Données et *Plus* (image, forme, tableau, modèles, calques, numéro, date, visionneuse ZPL, tout sélectionner, même étiquette partout). Glisser au doigt, zoom à deux doigts et appui long pour le menu contextuel.
+Sur téléphone et tablette, une barre inférieure propose Texte, Code-barres, QR, Données et *Plus* (image, forme, tableau, modèles, calques, numéro, date, visionneuse ZPL, tout sélectionner, même étiquette partout). Glisser au doigt (avec l’outil Main actif, un doigt déplace la vue), zoom à deux doigts et appui long pour le menu contextuel.
 
 ## Taille, résolution et formats
 
@@ -87,6 +87,7 @@ Menu grille de la barre de configuration :
 ## Aperçus
 
 - **Mode aperçu** (œil, en bas à droite) : masque les outils.
+- **Outil Main** (icône de main, barre de zoom) : glisser n’importe où sur le canevas déplace la vue au lieu de sélectionner ou déplacer les éléments (curseur main ouverte, puis fermée pendant le glisser). Touche **H** pour l’activer ou le désactiver, **Espace** maintenu pour une main temporaire, **V** ou **Échap** pour revenir à la sélection. Le **clic molette** maintenu déplace la vue quel que soit l’outil. Double-clic sur le bouton (ou Ctrl+0) : recadrer. Le déplacement de la vue ne modifie pas le document et ne crée pas d’étape d’annulation.
 - **Aperçu thermique** (bouton à côté de l’œil) : l’étiquette est affichée telle que l’imprimante thermique l’imprimera, en noir et blanc à la résolution du document — même rendu que le ZPL « tout en image » : gris tramés (trame de Bayer 8×8), codes-barres et QR en noir pur. Il suit la ligne de données affichée et reste modifiable.
 
 ## Raccourcis clavier
@@ -111,11 +112,16 @@ Liste de l’aide intégrée (*Aide* → *Aide et raccourcis*), complétée des 
 | Ctrl+= / Ctrl+- | Zoom avant / arrière |
 | Ctrl+0 | Ajuster à la fenêtre |
 | Molette | Faire défiler |
+| H | Outil Main : déplacer la vue (bascule) |
+| Espace maintenu | Main temporaire : glisser pour déplacer la vue |
+| Clic molette maintenu | Déplacer la vue (quel que soit l’outil) |
+| V / Échap | Revenir à la sélection (outil Main) |
+| Double-clic sur la main | Recadrer la vue (comme Ctrl+0) |
 | Maj + clic | Ajouter / retirer de la sélection |
 | Alt + clic | Sélectionner un élément dans un groupe |
 | Alt pendant un déplacement | Désactiver l’aimantation |
 | Double-clic | Modifier un texte ou une cellule |
-| Échap | Désélectionner / fermer (quitte aussi le mode aperçu) |
+| Échap | Désélectionner / fermer (quitte aussi le mode aperçu et l’outil Main) |
 
 Sur macOS, Cmd remplace Ctrl. Les raccourcis sont inactifs quand le curseur est dans un champ de saisie ou qu’une fenêtre est ouverte.
 

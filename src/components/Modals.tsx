@@ -375,6 +375,11 @@ export function HelpModal() {
     ['Ctrl+= / Ctrl+-', 'Zoom avant / arrière'],
     ['Ctrl+0', 'Ajuster à la fenêtre'],
     ['Molette', 'Faire défiler'],
+    ['H', 'Outil Main : déplacer la vue (bascule)'],
+    ['Espace maintenu', 'Main temporaire : glisser pour déplacer la vue'],
+    ['Clic molette maintenu', 'Déplacer la vue (quel que soit l’outil)'],
+    ['V / Échap', 'Revenir à la sélection'],
+    ['Double-clic sur la main', 'Recadrer la vue'],
     ['Maj + clic', 'Ajouter / retirer de la sélection'],
     ['Alt + clic', 'Sélectionner un élément dans un groupe'],
     ['Alt pendant un déplacement', 'Désactiver l’aimantation'],
@@ -402,7 +407,7 @@ export function HelpModal() {
           {rows.map(([k, v]) => (
             <tr key={k} style={{ borderBottom: '1px solid var(--line)' }}>
               <td style={{ padding: '5px 0', width: '45%' }}>
-                <K k={k} />
+                <K k={t(k)} />
               </td>
               <td>{t(v)}</td>
             </tr>
