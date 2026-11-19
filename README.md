@@ -1,6 +1,6 @@
 # MyLabelZebra
 
-étiquettes’étiquettes gratuit qui fonctionne entièrement dans le navigateur**, pour les imprimantes thermiques Zebra (ZPL) comme pour les imprimantes de bureau (PDF, planches Avery). Aucune donnée n’est envoyée à un serveur : vos étiquettes, vos fichiers de données et votre historique restent dans votre navigateur.
+**MyLabelZebra est un éditeur d’étiquettes qui fonctionne entièrement dans le navigateur**, pour les imprimantes thermiques Zebra (ZPL) comme pour les imprimantes de bureau (PDF, planches Avery). Aucune donnée n’est envoyée à un serveur : vos étiquettes, vos fichiers de données et votre historique restent dans votre navigateur.
 
 ![Éditeur MyLabelZebra](docs/images/editeur.png)
 
