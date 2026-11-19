@@ -1137,6 +1137,8 @@ export const EN: Record<string, string> = {
   'Recadrer la vue': 'Reset the view',
   'Espace maintenu': 'Hold Space',
   'Clic molette maintenu': 'Hold middle button',
+  'Clic droit + glisser': 'Right-click + drag',
+  'Déplacer la vue (clic droit simple : menu contextuel)': 'Pan the view (single right-click: context menu)',
   'V / Échap': 'V / Esc',
   'Double-clic sur la main': 'Double-click the hand',
   'Ctrl + molette': 'Ctrl + wheel',

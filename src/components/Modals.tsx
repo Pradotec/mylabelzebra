@@ -378,6 +378,7 @@ export function HelpModal() {
     ['H', 'Outil Main : déplacer la vue (bascule)'],
     ['Espace maintenu', 'Main temporaire : glisser pour déplacer la vue'],
     ['Clic molette maintenu', 'Déplacer la vue (quel que soit l’outil)'],
+    ['Clic droit + glisser', 'Déplacer la vue (clic droit simple : menu contextuel)'],
     ['V / Échap', 'Revenir à la sélection'],
     ['Double-clic sur la main', 'Recadrer la vue'],
     ['Maj + clic', 'Ajouter / retirer de la sélection'],

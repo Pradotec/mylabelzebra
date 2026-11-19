@@ -115,6 +115,7 @@ Liste de l’aide intégrée (*Aide* → *Aide et raccourcis*), complétée des 
 | H | Outil Main : déplacer la vue (bascule) |
 | Espace maintenu | Main temporaire : glisser pour déplacer la vue |
 | Clic molette maintenu | Déplacer la vue (quel que soit l’outil) |
+| Clic droit + glisser | Déplacer la vue (un clic droit simple ouvre le menu contextuel) |
 | V / Échap | Revenir à la sélection (outil Main) |
 | Double-clic sur la main | Recadrer la vue (comme Ctrl+0) |
 | Maj + clic | Ajouter / retirer de la sélection |

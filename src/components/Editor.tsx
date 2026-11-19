@@ -88,6 +88,8 @@ interface PanDrag {
   sx: number;
   sy: number;
   pan0: { x: number; y: number };
+  /** clic droit : glisser = déplacement de la vue, clic simple = menu contextuel */
+  right?: { id: string; isEl: boolean; moved: boolean };
 }
 type Interaction = DragState | MarqueeState | GuideDrag | TableDrag | PanDrag | null;
 
@@ -330,6 +332,10 @@ export function Editor() {
       const cur = interRef.current;
       if (!cur) return;
       if (cur.kind === 'pan') {
+        if (cur.right && !cur.right.moved) {
+          if (Math.hypot(e.clientX - cur.sx, e.clientY - cur.sy) < 4) return;
+          cur.right.moved = true;
+        }
         useStore.setState({ pan: { x: cur.pan0.x + e.clientX - cur.sx, y: cur.pan0.y + e.clientY - cur.sy } });
         return;
       }
@@ -378,6 +384,15 @@ export function Editor() {
       setSnapLines({ x: [], y: [] });
       if (!cur) return;
       const st = useStore.getState();
+      if (cur.kind === 'pan' && cur.right) {
+        // clic droit sans glisser : menu contextuel (comportement habituel)
+        rightHandled.current = Date.now();
+        if (!cur.right.moved && !st.preview) {
+          if (cur.right.isEl && !st.selected.includes(cur.right.id)) st.select([cur.right.id]);
+          setCtxMenu({ x: cur.sx, y: cur.sy });
+        }
+        return;
+      }
       if (cur.kind === 'move') {
         if (cur.moved) {
           const map = new Map(cur.items.map((i) => [i.id, i]));
@@ -485,6 +500,7 @@ export function Editor() {
   };
 
   const lastDown = useRef({ id: '', t: 0 });
+  const rightHandled = useRef(0);
   // ---- événements Konva ----
   const onStageDown = (e: Konva.KonvaEventObject<PointerEvent>) => {
     if (pinch.current) return;
@@ -496,8 +512,14 @@ export function Editor() {
       begin({ kind: 'pan', sx: e.evt.clientX, sy: e.evt.clientY, pan0: useStore.getState().pan });
       return;
     }
+    // clic droit : glisser = déplacement de la vue ; relâché sans bouger = menu contextuel
+    if (btn === 2) {
+      setCtxMenu(null);
+      const tg = e.target;
+      begin({ kind: 'pan', sx: e.evt.clientX, sy: e.evt.clientY, pan0: useStore.getState().pan, right: { id: tg.id(), isEl: tg.name() === 'el', moved: false } });
+      return;
+    }
     if (preview) return;
-    if (btn === 2) return;
     setCtxMenu(null);
     const target = e.target;
     if (target.getParent()?.className === 'Transformer') return;
@@ -618,6 +640,9 @@ export function Editor() {
 
   const onContextMenu = (e: Konva.KonvaEventObject<PointerEvent>) => {
     e.evt.preventDefault();
+    // clic droit souris : géré au relâchement (glisser = déplacement de la vue)
+    const cur = interRef.current;
+    if ((cur?.kind === 'pan' && cur.right) || Date.now() - rightHandled.current < 400) return;
     if (preview) return;
     const target = e.target;
     if (target.name() === 'el' && !useStore.getState().selected.includes(target.id())) useStore.getState().select([target.id()]);
