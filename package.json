@@ -1,0 +1,32 @@
+{
+  "name": "mylabelzebra",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "bwip-js": "^4.5.1",
+    "jspdf": "^4.2.1",
+    "jszip": "^3.10.1",
+    "konva": "9.3.16",
+    "lucide-react": "0.460.0",
+    "papaparse": "5.4.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-konva": "18.2.10",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "zustand": "4.5.5"
+  },
+  "devDependencies": {
+    "@types/papaparse": "5.3.15",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.3",
+    "typescript": "5.6.3",
+    "vite": "5.4.11"
+  }
+}
