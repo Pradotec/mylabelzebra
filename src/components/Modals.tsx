@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { FolderOpen, Trash2, Copy, Pencil, HelpCircle, Printer, Monitor, RefreshCw, AlertTriangle, CheckCircle2, Download, FileDown, Grid3x3, Barcode, QrCode, Plus, ExternalLink, Settings2, History, RotateCcw, FormInput } from 'lucide-react';
 import { useStore } from '../store';
 import { Modal, NumField, Seg, Check } from './ui';
-import { t, getLang, setLang, LANGS } from '../i18n';
+import { t, tc, getLang, setLang, LANGS } from '../i18n';
 import { listSaved, deleteSaved, renameSaved, duplicateSaved, confirmDiscard, MAX_SAVED, setLabelSize } from '../actions';
 import type { SavedLabel, Symbology, QrLevel, LabelDoc } from '../types';
 import { batchJobs } from '../render/resolve';
@@ -162,7 +162,7 @@ export function PromptDialog() {
       footer={
         <>
           <button className="btn flat" onClick={() => ask.resolve(null)}>
-            {t('Annuler')}
+            {tc('Annuler', 'cancel')}
           </button>
           <button className="btn accent" onClick={ok}>
             <Printer size={16} /> {t('Continuer')}

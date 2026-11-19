@@ -5,6 +5,7 @@ import { newDoc, makeMark, normalizeDoc } from '../elements';
 import { generateLabelZpl, needsRaster } from '../zpl/generate';
 import { lintZpl, parseZpl } from '../zpl/parse';
 import type { MarkEl } from '../types';
+import { textOf, promptFields, docUsesSerial, usesData } from './resolve';
 
 const errors = (z: string) => lintZpl(z).filter((x) => x.level === 'error');
 const measure = (s: string, fs: number) => s.length * fs * 0.5;
@@ -118,5 +119,20 @@ describe('estampille sanitaire', () => {
     expect(m.country).toBe('');
     expect(m.strokeWidth).toBe(3);
     expect(m.color).toBe('#000000');
+  });
+});
+
+describe('estampille : champs détectés (textOf)', () => {
+  it('pays, agrément et mention de l’estampille sont analysés ; le signe ℮ n’a pas de texte', () => {
+    const d = newDoc();
+    const h = makeMark(d, 'health', { country: '{{?Pays}}', approval: '{{Agrement}}-{{#}}', suffix: 'CE' });
+    const e = makeMark(d, 'estimated');
+    d.elements = [h, e];
+    expect(textOf(h)).toBe('{{?Pays}}\n{{Agrement}}-{{#}}\nCE');
+    expect(textOf(e)).toBe('');
+    expect(usesData(h)).toBe(true);
+    expect(usesData(e)).toBe(false);
+    expect(promptFields(d)).toEqual(['Pays']);
+    expect(docUsesSerial(d)).toBe(true);
   });
 });

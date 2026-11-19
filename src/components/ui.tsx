@@ -2,6 +2,22 @@ import { useEffect, useId, useRef, useState, type ReactNode, type CSSProperties 
 import { X, Pipette } from 'lucide-react';
 import { t } from '../i18n';
 import { isNone } from '../render/draw';
+import { estimatedSignPaths } from '../render/marks';
+
+/**
+ * Icône du signe ℮ (quantité estimée) dessinée d'après le gabarit de la directive 76/211/CEE :
+ * le caractère U+212E ressemble à un « e » dans la plupart des polices d'interface.
+ */
+const ESTIMATED_PATHS = estimatedSignPaths();
+export function EstimatedSignIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="-4 -4 108 108" aria-hidden="true" focusable="false" style={{ flex: 'none' }}>
+      {ESTIMATED_PATHS.map((d, i) => (
+        <path key={i} d={d} fill="currentColor" />
+      ))}
+    </svg>
+  );
+}
 
 export function useClickOutside(open: boolean, onClose: () => void, ...refs: React.RefObject<HTMLElement>[]) {
   useEffect(() => {

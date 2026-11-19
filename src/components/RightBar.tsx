@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useState } from 'react';
 import { Database, Hash, CalendarDays, ScanLine, Upload, Link2, Trash2, Pencil, Check as CheckIcon, X, AlertTriangle, Search, Package, ListOrdered, Download } from 'lucide-react';
 import { useStore, type RightPanel } from '../store';
 import { Panel, NumField, Check, Modal } from './ui';
-import { t } from '../i18n';
+import { t, tc } from '../i18n';
 import { parseDelimited, parseFile, fetchSheet, canSwitchSheet, reloadSheet, type DataWarning } from '../data';
 import { insertToken } from '../actions';
 import { pickFile, downloadText } from '../util';
@@ -375,7 +375,7 @@ function DataTable({ data, visible }: { data: DataSet; visible: number[] }) {
                   <button className="icon-btn flat sm" aria-label={t('Valider')} onClick={() => (setData((d) => ({ ...d, rows: d.rows.map((x, k) => (k === i ? draft : x)) })), setEditRow(null))}>
                     <CheckIcon size={14} />
                   </button>
-                  <button className="icon-btn flat sm" aria-label={t('Annuler')} onClick={() => setEditRow(null)}>
+                  <button className="icon-btn flat sm" aria-label={tc('Annuler', 'cancel')} onClick={() => setEditRow(null)}>
                     <X size={14} />
                   </button>
                 </td>

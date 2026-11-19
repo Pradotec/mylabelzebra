@@ -53,3 +53,19 @@ export function t(s: string, vars?: Record<string, string | number>): string {
   if (vars) for (const k in vars) out = out.split(`{${k}}`).join(String(vars[k]));
   return out;
 }
+
+/** Nombre formaté selon la langue (virgule en français, point en anglais), sans séparateur de milliers. */
+export function num(v: number, maxDecimals = 2): string {
+  const s = String(Math.round(v * 10 ** maxDecimals) / 10 ** maxDecimals);
+  return current === 'fr' ? s.replace('.', ',') : s;
+}
+
+/**
+ * Texte français ambigu traduit selon un contexte : clé de dictionnaire « texte|contexte »
+ * (ex. tc('Annuler', 'cancel') → « Cancel », alors que t('Annuler') → « Undo »).
+ * En français, le texte est affiché tel quel.
+ */
+export function tc(s: string, ctx: string, vars?: Record<string, string | number>): string {
+  const k = `${s}|${ctx}`;
+  return t(DICTS[current][k] !== undefined ? k : s, vars);
+}

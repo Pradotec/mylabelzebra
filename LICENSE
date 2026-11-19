@@ -1,0 +1,218 @@
+COMMERCIAL SOURCE LICENSE – REVENUE SHARE Version 1.0 – 19 November 2026
+
+IMPORTANT This is a proprietary, source-available license. It is not an
+OSI-approved Open Source license. It is a drafting template and should
+be reviewed by a qualified lawyer before publication or commercial use.
+
+1.  RIGHTS HOLDER AND COVERED SOFTWARE
+
+Copyright (c) 2026 MASSON Thomas
+
+This license applies to the software identified in the repository
+containing this file, including its source code, object code,
+documentation and files expressly identified as part of the Software
+(the “Software”), to the extent the Rights Holder owns or controls the
+relevant rights.
+
+Rights Holder: MASSON Thomas France Contact: contact@thomasmasson.fr
+
+Third-party components are not relicensed by this document and remain
+subject to their own licenses and notices.
+
+2.  OWNERSHIP
+
+The Software is licensed, not sold. Except for the limited permissions
+expressly granted below, the Rights Holder retains all rights, title and
+interest in the Software and its original components.
+
+No trademark, patent or other intellectual-property license is granted
+except where mandatory law provides otherwise or a separate written
+agreement says so.
+
+3.  FREE PERMISSIONS
+
+Subject to compliance with this license, the Rights Holder grants each
+person receiving the Software a worldwide, non-exclusive, royalty-free
+license to:
+
+a.  view, download and reproduce the Software for evaluation, study and
+    development;
+b.  install, run and use the Software for personal purposes;
+c.  install, run and use the Software internally within an organization,
+    including for that organization’s own business operations, without
+    royalties, provided it is not made available as a service to
+    external users and is not distributed as a copy of the Software to
+    third parties;
+d.  modify the Software and create derivative versions;
+e.  create and publish forks, including public repository forks, for
+    non-commercial purposes, provided each fork and redistribution
+    containing substantial portions of the Software remains subject to
+    this same license, preserves applicable notices, and complies with
+    Sections 4 and 5.
+
+These permissions do not authorize SaaS, hosted third-party services,
+commercial redistribution of copies of the Software, or any use
+prohibited by Section 4.
+
+4.  COMMERCIAL USE AND REVENUE SHARE
+
+Commercial use is permitted only on the terms of this Section.
+
+Where the Software, or a derivative containing a substantial part of it,
+is used to generate revenue, is incorporated into a commercial product,
+or is used to provide a paid service other than a prohibited hosted
+service, the user must pay the Rights Holder a royalty equal to five
+percent (5%) of Net Attributable Revenue.
+
+“Net Attributable Revenue” means amounts actually received by the user
+from unaffiliated customers that are directly attributable to the
+commercial product, service or activity using the Software, excluding
+VAT and similar sales taxes, refunds, chargebacks and separately
+itemized pass-through expenses paid to third parties. If the Software is
+only one component of a wider product or service, revenue must be
+allocated on a reasonable, consistent and documented basis to the part
+attributable to the Software.
+
+No royalty is due for: a. personal use; b. internal organizational use
+that is not separately commercialized; c. non-commercial forks,
+modifications and public source-code publication permitted by Section 3.
+
+The user must keep accurate records of Net Attributable Revenue, provide
+a quarterly statement within thirty (30) days after each calendar
+quarter, and pay the corresponding royalty within thirty (30) days after
+sending the statement. The Rights Holder may, on reasonable prior notice
+and no more than once per calendar year, appoint an independent auditor
+bound by confidentiality to verify the relevant records. If an audit
+identifies an underpayment of more than five percent (5%) for the
+audited period, the user must reimburse reasonable audit costs in
+addition to the unpaid royalties.
+
+The five percent (5%) royalty is the default contractual rate under this
+license. A separate written agreement signed by the Rights Holder and
+the user may specify a different rate, reporting method or commercial
+scope.
+
+5.  PROHIBITED USES
+
+Unless the Rights Holder has signed a separate written amendment
+expressly authorizing the specific activity, you must not:
+
+a.  sell, resell, rent, lease, sublicense or commercially distribute
+    copies of the Software, in source or object-code form, as a
+    standalone product;
+b.  sell, publish or distribute the Software or a substantial portion of
+    its source code as a paid download, package, template, module or
+    competing code product;
+c.  offer the Software, its functionality, or a material derivative as
+    SaaS, PaaS, an API service, hosted application, managed service or
+    other network-accessible service to third parties, whether paid or
+    free;
+d.  provide third parties with a copy of the Software or operational
+    access to an instance of the Software, except for the permitted
+    publication of a non-commercial source-code fork under Sections 3(e)
+    and 6;
+e.  publish or distribute a fork for commercial purposes without written
+    authorization, even if the fork has been modified;
+f.  remove, obscure or misrepresent copyright, authorship, attribution
+    or license notices;
+g.  claim ownership of the original Software or represent it as your own
+    independently created product.
+
+For clarity, commercial use of the Software within a product or service
+that you operate yourself is permitted subject to the royalty in Section
+4, but SaaS and other hosted third-party services remain prohibited
+unless expressly authorized by a separate written amendment.
+
+6.  FORKS, MODIFICATIONS AND REDISTRIBUTION
+
+You may create, modify and publish forks free of charge for
+non-commercial purposes, subject to this license.
+
+When redistributing a fork or modified version, you must: a. include a
+complete copy of this license; b. retain all existing copyright and
+attribution notices; c. clearly identify your modifications and their
+dates, where reasonably practicable; d. not imply that the Rights Holder
+endorses your fork; e. not impose additional terms that remove or limit
+the permissions granted by this license for the original Software.
+
+A fork does not acquire broader rights than the original Software.
+Commercial fork distribution remains prohibited without a separate
+written amendment. Commercial use of a fork within the user’s own
+product or service is subject to the royalty in Section 4 and the SaaS
+restriction in Section 5.
+
+7.  CONTRIBUTIONS
+
+Unless a separate contributor agreement states otherwise, each
+contributor retains ownership of the copyright in their own
+contributions and grants the Rights Holder and recipients of the project
+the rights necessary to use, reproduce, modify and distribute those
+contributions under this license.
+
+Before accepting contributions, the project maintainer should publish a
+Contributor License Agreement (CLA) or equivalent contribution terms. Do
+not submit material that you do not have the right to contribute.
+
+8.  THIRD-PARTY MATERIAL
+
+The Software may include third-party libraries, assets or other
+materials governed by separate licenses. Those components are not
+covered by this license to the extent their own terms apply. You are
+responsible for complying with all applicable third-party notices and
+license conditions.
+
+9.  NO WARRANTY AND LIMITATION OF LIABILITY
+
+To the maximum extent permitted by applicable law, the Software is
+provided “AS IS”, without warranties or conditions of any kind, express
+or implied, including warranties of merchantability, fitness for a
+particular purpose, title and non-infringement.
+
+To the maximum extent permitted by applicable law, the Rights Holder
+shall not be liable for any indirect, incidental, special, consequential
+or punitive damages, or for loss of profits, revenue, data or business
+opportunity, arising out of or relating to the Software or this license.
+
+Nothing in this license excludes or limits liability where such
+exclusion or limitation is prohibited by applicable law.
+
+10. TERMINATION
+
+The permissions granted under this license terminate automatically if
+you materially breach its terms. Where the breach is capable of remedy,
+the Rights Holder may provide written notice and a reasonable
+opportunity to remedy it before termination, except where immediate
+action is reasonably necessary to prevent ongoing infringement or harm.
+
+Upon termination, you must stop the use that is no longer authorized and
+delete or destroy copies in your possession, except to the extent
+retention is required by law. Sections intended by their nature to
+survive termination will survive.
+
+11. GENERAL
+
+If any provision is held unenforceable, it shall be adjusted to the
+minimum extent necessary, and the remaining provisions shall remain in
+effect.
+
+No failure or delay in enforcing a provision constitutes a waiver.
+
+This license does not create an agency, partnership, employment or joint
+venture relationship.
+
+12. GOVERNING LAW AND JURISDICTION
+
+This license is governed by the laws of France, subject to any mandatory
+rules of law that apply.
+
+Disputes shall be submitted to the competent courts in France, subject
+to mandatory rules governing jurisdiction and the rights of consumers or
+other protected parties.
+
+13. CONTACT AND COMMERCIAL REQUESTS
+
+For commercial permissions, exceptions or questions, contact:
+
+MASSON Thomas contact@thomasmasson.fr France
+
+END OF LICENSE

@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Types, tests et build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # pdfjs-dist 6 exige Node >= 22.13
+          node-version: 22
+          cache: npm
+
+      - name: Installer les dépendances
+        run: npm ci --no-audit --no-fund
+
+      - name: Vérification TypeScript
+        run: npx tsc --noEmit
+
+      - name: Tests (Vitest)
+        run: npm test
+
+      - name: Build de production
+        run: npm run build
+
+      - name: Archiver dist/
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 7
+
+  docker:
+    name: Image Docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construire l'image
+        run: docker build -t mylabelzebra:ci .
+
+      - name: Démarrer le conteneur
+        run: docker run -d --name mlz -p 8080:8080 mylabelzebra:ci
+
+      - name: Vérifier le service
+        run: |
+          for i in $(seq 1 20); do
+            curl -fsS http://localhost:8080/healthz && break
+            sleep 1
+          done
+          # page d'accueil
+          curl -fsS http://localhost:8080/ | grep -q '<title>MyLabelZebra'
+          # repli SPA : une route inconnue renvoie index.html
+          curl -fsS http://localhost:8080/route/inconnue | grep -q '<div id="root">'
+          # cache long et immuable pour les fichiers de /assets/
+          asset=$(curl -fsS http://localhost:8080/ | grep -o '/assets/index-[^"]*\.js' | head -n1)
+          curl -fsSI "http://localhost:8080${asset}" | grep -qi 'cache-control: public, max-age=31536000, immutable'
+          # service worker et manifeste jamais mis en cache sans revalidation
+          curl -fsSI http://localhost:8080/sw.js | grep -qi 'cache-control: no-cache'
+          curl -fsSI http://localhost:8080/manifest.webmanifest | grep -qi 'content-type: application/manifest+json'
+          # worker pdf.js servi comme JavaScript
+          worker=$(docker exec mlz sh -c 'ls /usr/share/nginx/html/assets | grep "\.mjs$" | head -n1')
+          if [ -n "$worker" ]; then
+            curl -fsSI "http://localhost:8080/assets/${worker}" | grep -qi 'content-type: application/javascript'
+          fi
+          echo "Image OK"
+
+      - name: Journaux du conteneur
+        if: always()
+        run: docker logs mlz || true

@@ -13,7 +13,7 @@ import { useStore } from './store';
 import type { LabelDoc } from './types';
 import { batchJobs, promptFields, promptSpecs, docUsesSscc, type PrintJob } from './render/resolve';
 import { getLastPrompts, setLastPrompts, validatePrompts, type PromptSpec } from './prompts';
-import { withSsccRange, SsccCommitError, type SsccAssignment, type SsccDoc } from './sscc';
+import { withSsccRange, SsccCommitError } from './sscc';
 import { kvGet, kvSet, kvDel, isQuotaError, storageErrorMessage } from './storage';
 import { isCancelled } from './progress';
 import { generateJobsZpl } from './zpl/generate';
@@ -120,7 +120,7 @@ type StoredEntry = Omit<HistoryEntry, 'doc'> & {
   promptValues?: Record<string, string>;
   jobDate?: number;
   /** plage SSCC du travail (réimpression à l'identique) */
-  ssccJob?: SsccAssignment;
+  ssccJob?: LabelDoc['ssccJob'];
 };
 
 /** Empreinte 53 bits (cyrb53) + longueur : suffisant pour dédupliquer des documents */
@@ -139,7 +139,7 @@ export function hashString(s: string): string {
 
 /** Sépare le document d'un travail en partie commune (dédupliquée) et valeurs propres au travail */
 function splitDoc(doc: LabelDoc) {
-  const { promptValues, jobDate, ssccJob, ...base } = doc as SsccDoc;
+  const { promptValues, jobDate, ssccJob, ...base } = doc;
   const json = JSON.stringify(base);
   return { json, hash: hashString(json), promptValues, jobDate, ssccJob };
 }
@@ -244,7 +244,7 @@ async function hydrate(it: IndexItem, docs: Map<string, Promise<LabelDoc | undef
   const base = await docs.get(e.docHash)!;
   if (!base) return null;
   const { docHash: _h, promptValues, jobDate, ssccJob, ...rest } = e;
-  const doc: SsccDoc = { ...base };
+  const doc: LabelDoc = { ...base };
   if (promptValues !== undefined) doc.promptValues = promptValues;
   if (jobDate !== undefined) doc.jobDate = jobDate;
   if (ssccJob !== undefined) doc.ssccJob = ssccJob;
@@ -446,7 +446,7 @@ export async function startJob(kind: JobKind, o: StartOpts = {}): Promise<number
     }
     setLastPrompts(base.id, prompts);
   }
-  const doc: SsccDoc = jobDoc(base, prompts);
+  const doc: LabelDoc = jobDoc(base, prompts);
   const jobs = jobsFor(doc, kind, opts);
   const run = async () => {
     try {
@@ -522,6 +522,6 @@ export function historyDocForEditing(e: HistoryEntry): LabelDoc {
   const d = JSON.parse(JSON.stringify(e.doc)) as LabelDoc;
   delete d.promptValues;
   delete d.jobDate;
-  delete (d as SsccDoc).ssccJob;
+  delete d.ssccJob;
   return d;
 }

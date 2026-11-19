@@ -8,6 +8,7 @@ import { setLabelSize, getResizeMode, setResizeMode, type ResizeMode } from '../
 import { BASE_DPI } from '../types';
 import { inToMm, mmToIn, round } from '../util';
 import { isNone } from '../render/draw';
+import { RollColumnsSetting } from './PropertiesPanel';
 
 const PRINTERS: { id: P; label: string }[] = [
   { id: 'computer', label: 'Cet ordinateur' },
@@ -149,6 +150,7 @@ export function SetupBar() {
                 {t('{w} × {h} points à {dpi} dpi', { w: Math.round(doc.widthIn * doc.dpi), h: Math.round(doc.heightIn * doc.dpi), dpi: doc.dpi })}
               </div>
             </div>
+            <RollColumnsSetting preview={false} />
           </div>
         )}
       </Dropdown>

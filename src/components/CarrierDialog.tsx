@@ -26,6 +26,11 @@ interface CarrierState {
 export const useCarrier = create<CarrierState>()(() => ({ open: false, items: [], settings: DEFAULT_SETTINGS, busy: '' }));
 
 export const openCarrierDialog = () => useCarrier.setState({ open: true });
+/** Ouvre la fenêtre et y ajoute des fichiers (dépôt sur l'éditeur) */
+export function openCarrierWithFiles(files: File[]) {
+  openCarrierDialog();
+  return addCarrierFiles(files);
+}
 const closeCarrier = () => useCarrier.setState({ open: false });
 const setItems = (f: (l: CarrierItem[]) => CarrierItem[]) => useCarrier.setState((s) => ({ items: f(s.items) }));
 const refresh = () => setItems((l) => [...l]);

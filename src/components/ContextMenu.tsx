@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { Copy, ClipboardPaste, CopyPlus, Trash2, BringToFront, SendToBack, Group, Ungroup, Lock, Unlock, BoxSelect, ImagePlus, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Stamp, Images, ClipboardCheck } from 'lucide-react';
 import { useStore } from '../store';
-import { useClickOutside } from './ui';
+import { useClickOutside, EstimatedSignIcon } from './ui';
 import { t } from '../i18n';
 import { addImageFile, addHealthMark, addEstimatedSign } from '../actions';
 import { openSideDialog } from './SideDialogs';
@@ -97,7 +97,7 @@ export function ContextMenu({ state, onClose }: { state: CtxMenuState; onClose: 
             <Stamp size={16} /> {t('Estampille sanitaire')}
           </button>
           <button className="mi" onClick={run(addEstimatedSign)}>
-            <span style={{ width: 16, textAlign: 'center', fontWeight: 700 }}>℮</span> {t('Signe ℮ (quantité estimée)')}
+            <EstimatedSignIcon size={16} /> {t('Quantité estimée')}
           </button>
           <button className="mi" onClick={run(() => openSideDialog('pictos'))}>
             <Images size={16} /> {t('Mes pictogrammes…')}

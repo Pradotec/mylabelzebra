@@ -2,6 +2,8 @@
   "name": "mylabelzebra",
   "private": true,
   "version": "1.0.0",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "MASSON Thomas <contact@thomasmasson.fr>",
   "type": "module",
   "scripts": {
     "dev": "vite",

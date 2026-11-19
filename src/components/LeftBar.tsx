@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
-import { Type, Barcode, QrCode, Image as ImageIcon, Shapes, Table2, LayoutTemplate, Layers, Eye, EyeOff, Lock, Unlock, Trash2, GripVertical, Search, Wifi, Contact, Link, Filter, Apple, Truck } from 'lucide-react';
+import { Type, Barcode, QrCode, Image as ImageIcon, Shapes, Table2, LayoutTemplate, Layers, Eye, EyeOff, Lock, Unlock, Trash2, GripVertical, Search, Wifi, Contact, Link, Filter, Apple, Truck, Stamp, Images } from 'lucide-react';
 import { useStore, type LeftPanel } from '../store';
-import { Panel, Modal } from './ui';
+import { Panel, Modal, EstimatedSignIcon } from './ui';
 import { t } from '../i18n';
-import { addText, addQr, addShape, addTable, addImageFile, addBarcode, confirmDiscard } from '../actions';
+import { addText, addQr, addShape, addTable, addImageFile, addBarcode, confirmDiscard, addHealthMark, addEstimatedSign } from '../actions';
 import { pickFile } from '../util';
 import { SYMBOLOGIES } from '../render/codes';
 import { searchShapes, CATEGORY_LABELS, symbolSvg, type ShapeDef, type ShapeCategory } from '../render/shapes';
@@ -14,6 +14,7 @@ import { sizeLabel } from '../sizes';
 import { makeQr } from '../elements';
 import { openNutritionDialog } from './NutritionDialog';
 import { openCarrierDialog } from './CarrierDialog';
+import { openSideDialog } from './SideDialogs';
 
 export function LeftBar() {
   const st = useStore();
@@ -207,6 +208,22 @@ function ShapePanel() {
         <Search size={15} style={{ position: 'absolute', left: 9, top: 9, color: 'var(--ink-3)' }} />
         <input className="inp" style={{ paddingLeft: 30 }} placeholder={t('Rechercher (ex. étoile, entretien, danger…)')} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} autoFocus />
       </div>
+      {!q && (
+        <div style={{ marginBottom: 12 }}>
+          <div className="sec-t">{t('Réglementaire')}</div>
+          <div className="row" style={{ flexWrap: 'wrap', gap: 4 }}>
+            <button className="btn sm" onClick={addHealthMark} title={t('Estampille sanitaire ovale (règl. CE 853/2004)')}>
+              <Stamp size={14} /> {t('Estampille')}
+            </button>
+            <button className="btn sm" onClick={addEstimatedSign} title={t('Signe ℮ de quantité estimée (directive 76/211/CEE)')}>
+              <EstimatedSignIcon /> {t('Quantité estimée')}
+            </button>
+            <button className="btn sm" onClick={() => (close(), openSideDialog('pictos'))} title={t('Vos logos et pictogrammes (Triman, Nutri-Score…) enregistrés dans ce navigateur')}>
+              <Images size={14} /> {t('Mes pictogrammes…')}
+            </button>
+          </div>
+        </div>
+      )}
       {!list.length && <div className="hint">{t('Aucun résultat')}</div>}
       {cats.map((c) => (
         <div key={c} style={{ marginBottom: 12 }}>

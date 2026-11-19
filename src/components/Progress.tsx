@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useProgress, cancelProgress } from '../progress';
-import { t } from '../i18n';
+import { t, tc } from '../i18n';
 
 /** Délai avant affichage : les petits exports se terminent sans clignotement */
 const SHOW_AFTER = 400;
@@ -29,7 +29,7 @@ export function ProgressOverlay() {
         <progress value={done} max={total || 1} style={{ width: '100%', marginTop: 4 }} aria-label={t('{p} %', { p: pct })} />
       </div>
       <button className="btn flat" disabled={cancelRequested} onClick={cancelProgress}>
-        {t('Annuler')}
+        {tc('Annuler', 'cancel')}
       </button>
     </div>
   );

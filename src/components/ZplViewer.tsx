@@ -9,11 +9,22 @@ import { copyText, downloadText, pickFile, safeFileName } from '../util';
 import { sendToZebra } from '../actions';
 import { newDoc } from '../elements';
 
+/** ZPL à afficher à la prochaine ouverture (fichier .zpl déposé sur l'éditeur) */
+let pendingCode: string | null = null;
+export function openZplViewer(code?: string) {
+  pendingCode = code ?? null;
+  useStore.getState().set('modal', 'zpl');
+}
+
 export function ZplViewer() {
   const st = useStore();
   const close = () => st.set('modal', null);
   const generated = () => generateBatchZpl(st.doc, st.previewRow);
-  const [code, setCode] = useState<string>(() => generated());
+  // pendingCode est vidé après le montage (l'initialiseur peut être appelé deux fois en StrictMode)
+  const [code, setCode] = useState<string>(() => pendingCode ?? generated());
+  useEffect(() => {
+    pendingCode = null;
+  }, []);
   const [labels, setLabels] = useState<ZLabel[]>([]);
   const [dpi, setDpi] = useState(String(st.doc.dpi));
   const [wIn, setW] = useState(st.doc.widthIn);

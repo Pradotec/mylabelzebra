@@ -44,8 +44,8 @@ import { distributeSelected, sameSizeSelected, addHealthMark, addEstimatedSign }
 import { useStore } from '../store';
 import type { LabelElement, TextEl, BarcodeEl, QrEl, ImageEl, ShapeEl, TableEl, CurveMode, Symbology, QrLevel, MarkEl, FoodRole } from '../types';
 import { BASE_DPI } from '../types';
-import { Panel, NumField, Check, Seg, ColorPicker, Dropdown } from './ui';
-import { t } from '../i18n';
+import { Panel, NumField, Check, Seg, ColorPicker, Dropdown, EstimatedSignIcon } from './ui';
+import { t, num } from '../i18n';
 import { FONTS, elementLabel, TYPE_LABELS, symbologyPatch } from '../elements';
 import { SYMBOLOGIES, encodeBarcode, encodeQr, qrPayload, is2D } from '../render/codes';
 import { shapeDef } from '../render/shapes';
@@ -576,7 +576,7 @@ function rowList(idx: number[], max = 12): string {
   return parts.join(', ') + (i < idx.length ? ' …' : '');
 }
 
-const mm = (v: number) => (Math.round(v * 100) / 100).toLocaleString('fr-FR');
+const mm = (v: number) => num(v);
 
 /** Mention obligatoire INCO : hauteur de x imprimée ≥ 1,2 mm (0,9 mm si plus grande face < 80 cm²) */
 function IncoSection({ el }: { el: TextEl }) {
@@ -1213,15 +1213,7 @@ function MarkProps({ el }: { el: MarkEl }) {
 // ---------- Panneau à vide : document ----------
 
 function DocPanel() {
-  const st = useStore();
   const report = useFoodReport();
-  const cols = rollColumns(st.doc);
-  const roll = st.doc.roll ?? { columns: 1, gapMm: 3, leftMm: 0 };
-  const setRoll = (p: Partial<typeof roll>) =>
-    st.setDoc((d) => {
-      const next = { ...roll, ...p };
-      d.roll = next.columns > 1 ? next : undefined;
-    }, 'roll');
   return (
     <Panel className="props" title={t('Étiquette')} icon={<SlidersHorizontal size={16} />}>
       <div className="sec-t">{t('Insérer')}</div>
@@ -1230,7 +1222,7 @@ function DocPanel() {
           <Stamp size={14} /> {t('Estampille')}
         </button>
         <button className="btn sm" onClick={addEstimatedSign} title={t('Signe ℮ de quantité estimée (directive 76/211/CEE)')}>
-          ℮ {t('Signe ℮')}
+          <EstimatedSignIcon /> {t('Quantité estimée')}
         </button>
         <button className="btn sm" onClick={() => openSideDialog('pictos')}>
           <Images size={14} /> {t('Mes pictogrammes…')}
@@ -1251,35 +1243,53 @@ function DocPanel() {
           <ClipboardCheck size={14} /> {t('Vérifier les mentions…')}
         </button>
       </div>
-      <div className="sec">
-        <div className="sec-t">
-          <Columns3 size={14} style={{ verticalAlign: -2 }} /> {t('Étiquettes de front sur le rouleau')}
-        </div>
-        <Seg
-          value={String(cols) as '1' | '2' | '3'}
-          onChange={(v) => setRoll({ columns: Number(v) })}
-          options={[
-            { v: '1', label: '1' },
-            { v: '2', label: '2' },
-            { v: '3', label: '3' },
-          ]}
-        />
-        {cols > 1 && (
-          <>
-            <div className="grid2" style={{ marginTop: 6 }}>
-              <NumField label={t('Écart entre étiquettes')} suffix="mm" decimals={1} min={0} max={50} step={0.5} value={roll.gapMm} onChange={(v) => setRoll({ gapMm: v })} />
-              <NumField label={t('Marge gauche')} suffix="mm" decimals={1} min={0} max={50} step={0.5} value={roll.leftMm} onChange={(v) => setRoll({ leftMm: v })} />
-            </div>
-            <RollPreview />
-            <div className="hint">
-              {t('Impression Zebra : les étiquettes successives du lot sont placées côte à côte, une rangée par format (^PW = largeur totale du rouleau : {w} mm). La dernière rangée peut rester incomplète.', {
-                w: mm((rollGeometryU(st.doc).totalW / BASE_DPI) * 25.4),
-              })}
-            </div>
-          </>
-        )}
-      </div>
+      <RollColumnsSetting />
     </Panel>
+  );
+}
+
+/**
+ * Étiquettes de front sur le rouleau (1 à 3 colonnes) : doc.roll, retiré pour 1 colonne.
+ * Partagé par le panneau Étiquette et la barre de configuration ; chaque réglage est annulable.
+ */
+export function RollColumnsSetting({ preview = true }: { preview?: boolean }) {
+  const st = useStore();
+  const cols = rollColumns(st.doc);
+  const roll = st.doc.roll ?? { columns: 1, gapMm: 3, leftMm: 0 };
+  const setRoll = (p: Partial<typeof roll>) =>
+    st.setDoc((d) => {
+      const next = { ...roll, ...p };
+      d.roll = next.columns > 1 ? next : undefined;
+    }, 'roll');
+  return (
+    <div className="sec">
+      <div className="sec-t">
+        <Columns3 size={14} style={{ verticalAlign: -2 }} /> {t('Étiquettes de front sur le rouleau')}
+      </div>
+      <Seg
+        value={String(cols) as '1' | '2' | '3'}
+        onChange={(v) => setRoll({ columns: Number(v) })}
+        options={[
+          { v: '1', label: '1' },
+          { v: '2', label: '2' },
+          { v: '3', label: '3' },
+        ]}
+      />
+      {cols > 1 && (
+        <>
+          <div className="grid2" style={{ marginTop: 6 }}>
+            <NumField label={t('Écart entre étiquettes')} suffix="mm" decimals={1} min={0} max={50} step={0.5} value={roll.gapMm} onChange={(v) => setRoll({ gapMm: v })} />
+            <NumField label={t('Marge gauche')} suffix="mm" decimals={1} min={0} max={50} step={0.5} value={roll.leftMm} onChange={(v) => setRoll({ leftMm: v })} />
+          </div>
+          {preview && <RollPreview />}
+          <div className="hint">
+            {t('Impression Zebra : les étiquettes successives du lot sont placées côte à côte, une rangée par format (^PW = largeur totale du rouleau : {w} mm). La dernière rangée peut rester incomplète.', {
+              w: mm((rollGeometryU(st.doc).totalW / BASE_DPI) * 25.4),
+            })}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

@@ -8,7 +8,7 @@ import { createPortal } from 'react-dom';
 import { create } from 'zustand';
 import { CheckCircle2, AlertTriangle, Info, ClipboardCheck, Images, Upload, Trash2, Pencil, Plus } from 'lucide-react';
 import { Modal } from './ui';
-import { t } from '../i18n';
+import { t, num } from '../i18n';
 import { useStore } from '../store';
 import { analyzeFood, type FoodReport } from '../food';
 import { elementLabel } from '../elements';
@@ -30,7 +30,7 @@ export function SideDialogs() {
   return null;
 }
 
-const mm = (v: number) => (Math.round(v * 100) / 100).toLocaleString('fr-FR');
+const mm = (v: number) => num(v);
 
 /** Rapport de conformité du document courant (étiquettes du lot pour la hauteur de x) */
 export function useFoodReport(): FoodReport {

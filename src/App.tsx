@@ -9,13 +9,13 @@ import { LeftBar } from './components/LeftBar';
 import { RightBar } from './components/RightBar';
 import { Editor } from './components/Editor';
 import { PropertiesPanel } from './components/PropertiesPanel';
-import { ZplViewer } from './components/ZplViewer';
+import { ZplViewer, openZplViewer } from './components/ZplViewer';
 import { SavedLabels, HelpModal, PrintDialog, ExportDialog, ZebraPanel, SheetsDialog, BarcodeTool, QrTool, PromptDialog, HistoryModal } from './components/Modals';
-import { CarrierDialogHost } from './components/CarrierDialog';
+import { CarrierDialogHost, useCarrier, openCarrierWithFiles } from './components/CarrierDialog';
 import { NutritionDialogHost } from './components/NutritionDialog';
 import { Dropdown } from './components/ui';
 import { nudge } from './components/ContextMenu';
-import { t, onLangChange } from './i18n';
+import { t, tc, onLangChange } from './i18n';
 import { addImageFile, addText, addQr, addBarcode, saveCurrent } from './actions';
 import { applyUrlParams } from './urlParams';
 import { applyRemoteUrl, installMessageApi } from './remote';
@@ -113,7 +113,7 @@ function RemoteBanner() {
         )}
       </div>
       <button className="btn flat" onClick={() => (req.resolve(false, false), setRemember(false))}>
-        {t('Annuler')}
+        {tc('Annuler', 'cancel')}
       </button>
       <button className="btn accent" onClick={() => (req.resolve(true, remember), setRemember(false))}>
         {req.open ? t('Ouvrir') : t('Imprimer')}
@@ -311,6 +311,16 @@ function useShortcuts() {
       const files = Array.from(e.dataTransfer?.files || []);
       if (!files.length) return;
       e.preventDefault();
+      // Étiquettes transporteur : un .pdf ou un .zip, plusieurs .zpl, ou fenêtre transporteur déjà
+      // ouverte → les fichiers d'étiquettes (ZPL, PDF, images, .zip) y partent ensemble.
+      // Sinon : un .zpl seul ouvre la visionneuse ZPL, une image est insérée dans l'étiquette.
+      const isData = (f: File) => /\.(csv|tsv|xlsx|xls|ods|txt|json)$/i.test(f.name);
+      const nZpl = files.filter((f) => /\.zpl$/i.test(f.name)).length;
+      if (useCarrier.getState().open || nZpl > 1 || files.some((f) => /\.(pdf|zip)$/i.test(f.name))) {
+        const labels = files.filter((f) => !isData(f));
+        if (labels.length) void openCarrierWithFiles(labels);
+        files.splice(0, files.length, ...files.filter(isData));
+      }
       for (const f of files) {
         if (f.type.startsWith('image/')) addImageFile(f);
         else if (/\.(csv|tsv|xlsx|xls|ods|txt)$/i.test(f.name))
@@ -323,7 +333,7 @@ function useShortcuts() {
             }
           });
         else if (/\.json$/i.test(f.name)) f.text().then((txt) => import('./actions').then((a) => a.importJsonText(txt)));
-        else if (/\.zpl$/i.test(f.name)) useStore.getState().set('modal', 'zpl');
+        else if (/\.zpl$/i.test(f.name)) f.text().then((txt) => openZplViewer(txt));
       }
     };
     // Écriture refusée par le stockage (quota) non interceptée par l'appelant

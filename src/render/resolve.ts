@@ -602,6 +602,8 @@ export function textOf(el: LabelElement): string {
     case 'barcode': return el.value;
     case 'qr': return qrPayload(el);
     case 'table': return el.cells.flat().join('\n');
+    // estampille : pays / agrément / mention peuvent contenir des {{champs}} ou {{?saisies}}
+    case 'mark': return el.kind === 'health' ? [el.country, el.approval, el.suffix].join('\n') : '';
     default: return '';
   }
 }

@@ -1,3 +1,5 @@
+import { num } from './i18n';
+
 export interface SizePreset {
   w: number;
   h: number;
@@ -124,6 +126,5 @@ export const SHEETS: SheetDef[] = [
 export const sheetById = (id?: string) => SHEETS.find((s) => s.id === id);
 
 export function sizeLabel(w: number, h: number) {
-  const f = (v: number) => (Math.round(v * 100) / 100).toString().replace('.', ',');
-  return `${f(w)}" × ${f(h)}"`;
+  return `${num(w)}" × ${num(h)}"`;
 }
