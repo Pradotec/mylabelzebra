@@ -292,6 +292,10 @@ export interface RollConfig {
 
 export interface LabelDoc {
   id: string;
+  /** version du format de fichier (voir src/migrate.ts) ; absente = 1 */
+  formatVersion?: number;
+  /** éléments d'un type inconnu (fichier d'une version plus récente), conservés pour le réexport */
+  unknownElements?: { index: number; element: Record<string, unknown> }[];
   name: string;
   widthIn: number;
   heightIn: number;

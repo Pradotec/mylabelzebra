@@ -32,6 +32,7 @@ import { shapeDef } from './render/shapes';
 import { fontString as fontStr, textOffsetY, justifyWords, richSegments } from './render/textLayout';
 import { canvasToBlob, downloadBlob, downloadText, safeFileName } from './util';
 import { normalizeDoc } from './elements';
+import { FORMAT_VERSION, docVersion, migrateFile, restoreUnknownElements, type MigrationWarning } from './migrate';
 import { sheetById, type SheetDef } from './sizes';
 import { t } from './i18n';
 import { beginProgress, type ProgressHandle } from './progress';
@@ -42,14 +43,28 @@ export async function ready(doc: LabelDoc) {
 }
 
 // ---------- JSON ----------
+// Format et migrations : src/migrate.ts ; règles : docs/developpement.md
+/**
+ * Enveloppe { app, version, doc }. version = version du format du document (celle d'un
+ * fichier plus récent est conservée) ; les éléments de type inconnu mis de côté à
+ * l'ouverture reprennent leur place : rien n'est perdu en réexportant.
+ */
 export function docToJson(doc: LabelDoc) {
-  return JSON.stringify({ app: 'MyLabelZebra', version: 1, doc }, null, 2);
+  const out = restoreUnknownElements(doc);
+  const version = Math.max(FORMAT_VERSION, docVersion(out));
+  return JSON.stringify({ app: 'MyLabelZebra', version, doc: out }, null, 2);
 }
+/** Ouvre un fichier .mlz.json (ou un document nu) ; les avertissements sont ignorés */
 export function jsonToDoc(text: string): LabelDoc {
-  const o = JSON.parse(text);
-  const d = o && o.doc ? o.doc : o;
-  if (!d || !Array.isArray(d.elements)) throw new Error(t('Fichier d’étiquette invalide'));
-  return normalizeDoc({ ...d });
+  return jsonToDocWithWarnings(text).doc;
+}
+/**
+ * Comme jsonToDoc, avec les avertissements de compatibilité (fichier d'une version plus
+ * récente, éléments de type inconnu) — texte affichable : migrationWarningText().
+ */
+export function jsonToDocWithWarnings(text: string): { doc: LabelDoc; warnings: MigrationWarning[] } {
+  const { doc, warnings } = migrateFile(text);
+  return { doc: normalizeDoc(doc as Partial<LabelDoc>), warnings };
 }
 export function exportJson(doc: LabelDoc) {
   downloadText(docToJson(doc), safeFileName(doc.name) + '.mlz.json', 'application/json');

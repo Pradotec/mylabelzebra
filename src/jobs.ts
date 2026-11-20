@@ -13,11 +13,12 @@ import { useStore } from './store';
 import type { LabelDoc } from './types';
 import { batchJobs, promptFields, promptSpecs, docUsesSscc, type PrintJob } from './render/resolve';
 import { getLastPrompts, setLastPrompts, validatePrompts, type PromptSpec } from './prompts';
-import { withSsccRange, SsccCommitError } from './sscc';
-import { kvGet, kvSet, kvDel, isQuotaError, storageErrorMessage } from './storage';
+import { withSsccRange, SsccCommitError, LOG_KEY, type SsccAssignment, type SsccLogEntry } from './sscc';
+import { kvGet, kvSet, kvDel, kvUpdate, isQuotaError, storageErrorMessage } from './storage';
 import { isCancelled } from './progress';
 import { generateJobsZpl } from './zpl/generate';
-import { sendToZebra } from './actions';
+import { sendJobsToZebra, labelCount, mergeJobs, skipLabels } from './actions';
+import { enqueue, type QueueCtl } from './printQueue';
 import { printOnComputer, downloadPdf, downloadPdfZip, downloadImage, downloadSvg, downloadSheetsPdf, sheetSlots } from './export';
 import { sheetById } from './sizes';
 import { copyText, downloadText, safeFileName, uid } from './util';
@@ -79,7 +80,22 @@ export interface HistoryEntry {
   /** origine : 'url', origine postMessage… */
   source?: string;
   reprintOf?: string;
+  /*
+   * Champs ajoutés pour l'envoi par paquets — tous OPTIONNELS : les entrées enregistrées
+   * avant leur ajout (sans ces champs) restent lisibles et réimprimables telles quelles.
+   * Dans une entrée incomplète, `count` / `jobs` / `rows` décrivent ce qui a réellement été
+   * envoyé, `planned` le nombre d'étiquettes prévues et `remaining` celles non envoyées.
+   */
+  /** étiquettes prévues, présent seulement si le travail est incomplet (count < planned) */
+  planned?: number;
+  /** étiquettes non envoyées (reprise), présent seulement si le travail est incomplet */
+  remaining?: PrintJob[];
+  /** reprise d'un travail incomplet (identifiant de l'entrée d'origine) */
+  resumeOf?: string;
 }
+
+/** Travail incomplet : des étiquettes prévues n'ont pas été envoyées */
+export const isIncomplete = (e: HistoryEntry) => !!e.remaining?.length;
 
 export const MAX_HISTORY = 500;
 /** Taille maximale de l'historique (caractères JSON ≈ octets), documents dédupliqués compris */
@@ -363,8 +379,32 @@ export function jobsFor(doc: LabelDoc, kind: JobKind, opts: JobOpts): PrintJob[]
   return batchJobs(doc, row);
 }
 
+/** Résultat détaillé d'un travail : étiquettes réellement produites / envoyées */
+export interface ExecResult {
+  ok: boolean;
+  /** étiquettes envoyées (Zebra) ; absent = toutes */
+  sent?: PrintJob[];
+  /** étiquettes non envoyées (Zebra interrompu) */
+  remaining?: PrintJob[];
+  cancelled?: boolean;
+  error?: string;
+}
+
 /** Produit la sortie d'un travail déjà préparé (document figé). */
 export async function executeJob(doc: LabelDoc, kind: JobKind, jobs: PrintJob[], opts: JobOpts, advanceSerial = true): Promise<boolean> {
+  return (await executeJobDetailed(doc, kind, jobs, opts, advanceSerial)).ok;
+}
+
+/** Comme executeJob ; l'envoi Zebra se fait par paquets, piloté par la file (`ctl`). */
+export async function executeJobDetailed(doc: LabelDoc, kind: JobKind, jobs: PrintJob[], opts: JobOpts, advanceSerial = true, ctl?: QueueCtl): Promise<ExecResult> {
+  if (kind === 'zebra') {
+    const r = await sendJobsToZebra(doc, jobs, { ctl, advanceSerial: advanceSerial && !opts.onlyCurrent });
+    return { ok: r.sent.length > 0, sent: r.sent, remaining: r.remaining, cancelled: r.cancelled, error: r.error };
+  }
+  return { ok: await produce(doc, kind, jobs, opts) };
+}
+
+async function produce(doc: LabelDoc, kind: Exclude<JobKind, 'zebra'>, jobs: PrintJob[], opts: JobOpts): Promise<boolean> {
   const row = opts.currentRow ?? 0;
   switch (kind) {
     case 'ordinateur':
@@ -376,8 +416,6 @@ export async function executeJob(doc: LabelDoc, kind: JobKind, jobs: PrintJob[],
     case 'planches-pdf':
       await downloadSheetsPdf(doc, row);
       return true;
-    case 'zebra':
-      return sendToZebra(generateJobsZpl(doc, jobs), advanceSerial && !opts.onlyCurrent);
     case 'pdf':
       await downloadPdf(doc, jobs, opts.dpi || Math.max(300, doc.dpi));
       return true;
@@ -415,6 +453,19 @@ export interface StartOpts extends JobOpts {
   /** ne jamais ouvrir la fenêtre de saisie (API : valeurs manquantes = dernières valeurs) */
   noAsk?: boolean;
   source?: string;
+  /** exécuter dans ce travail de la file (demande distante déjà en file) au lieu d'en créer un */
+  queue?: QueueCtl;
+}
+
+/** Sorties « impression » : passent par la file d'impression (une à la fois, visibles) */
+export const QUEUED_KINDS: ReadonlySet<JobKind> = new Set<JobKind>(['zebra', 'ordinateur', 'planches']);
+
+export interface JobOutcome {
+  /** étiquettes produites / envoyées */
+  count: number;
+  /** étiquettes prévues (count < planned : travail incomplet, reprise possible) */
+  planned: number;
+  historyId: string;
 }
 
 /**
@@ -422,6 +473,12 @@ export interface StartOpts extends JobOpts {
  * Renvoie le nombre d'étiquettes produites, ou null si annulé / échoué.
  */
 export async function startJob(kind: JobKind, o: StartOpts = {}): Promise<number | null> {
+  const r = await startJobDetailed(kind, o);
+  return r ? r.count : null;
+}
+
+/** Comme startJob, avec le nombre d'étiquettes prévues (travail incomplet) */
+export async function startJobDetailed(kind: JobKind, o: StartOpts = {}): Promise<JobOutcome | null> {
   const st = useStore.getState();
   const base = o.doc ?? st.doc;
   const opts: JobOpts = { onlyCurrent: o.onlyCurrent, copies: o.copies, dpi: o.dpi, currentRow: o.currentRow ?? st.previewRow };
@@ -448,18 +505,44 @@ export async function startJob(kind: JobKind, o: StartOpts = {}): Promise<number
   }
   const doc: LabelDoc = jobDoc(base, prompts);
   const jobs = jobsFor(doc, kind, opts);
+  const exec = (ctl?: QueueCtl) => runPrepared(doc, kind, jobs, opts, { ctl, prompts, source: o.source, advanceSerial: true });
+  if (o.queue) return exec(o.queue);
+  if (QUEUED_KINDS.has(kind)) return enqueue({ name: doc.name, kind, source: o.source, total: labelCount(jobs) }, exec);
+  return exec();
+}
+
+interface RunOpts {
+  ctl?: QueueCtl;
+  prompts: Record<string, string>;
+  source?: string;
+  advanceSerial: boolean;
+  /** reprise : le document porte déjà sa plage SSCC (rien n'est réservé ni consommé) */
+  resumeOf?: string;
+}
+
+/** Exécute un travail préparé (document figé), plage SSCC comprise, puis l'inscrit dans l'historique */
+async function runPrepared(doc: LabelDoc, kind: JobKind, jobs: PrintJob[], opts: JobOpts, x: RunOpts): Promise<JobOutcome | null> {
+  const st = useStore.getState();
+  const out: { res: ExecResult } = { res: { ok: false } };
   const run = async () => {
     try {
-      return await executeJob(doc, kind, jobs, opts);
+      out.res = await executeJobDetailed(doc, kind, jobs, opts, x.advanceSerial && !x.resumeOf, x.ctl);
+      return out.res.ok;
     } catch (e) {
-      if (isCancelled(e)) st.toast(t('Opération annulée'), 'info');
-      else st.toast(t('Erreur : {m}', { m: (e as Error).message }), 'error');
+      if (isCancelled(e)) {
+        out.res = { ok: false, cancelled: true };
+        st.toast(t('Opération annulée'), 'info');
+      } else {
+        out.res = { ok: false, error: (e as Error).message };
+        st.toast(t('Erreur : {m}', { m: (e as Error).message }), 'error');
+      }
       return false;
     }
   };
   let ok = false;
-  if (docUsesSscc(doc)) {
-    // plage SSCC attribuée au travail, consommée seulement s'il réussit
+  if (docUsesSscc(doc) && !x.resumeOf) {
+    // plage SSCC attribuée au travail (réservée pendant l'envoi), consommée seulement si
+    // au moins une étiquette est partie ; la plage entière reste alors attribuée au travail
     try {
       ok = await withSsccRange(distinctIndices(jobs), { docName: doc.name, docId: doc.id, kind, hasData: !!doc.data?.rows.length }, (a) => {
         doc.ssccJob = a;
@@ -467,27 +550,75 @@ export async function startJob(kind: JobKind, o: StartOpts = {}): Promise<number
       });
     } catch (e) {
       st.toast((e as Error).message, 'error');
-      if (!(e instanceof SsccCommitError)) return null;
+      if (!(e instanceof SsccCommitError)) {
+        x.ctl?.finish('error', (e as Error).message);
+        return null;
+      }
       ok = true; // travail effectué malgré l'échec d'enregistrement (signalé)
     }
   } else ok = await run();
-  if (!ok) return null;
-  const count = jobs.reduce((a, j) => a + j.copies, 0);
-  await recordHistory({
+  const res = out.res;
+  if (!ok) {
+    x.ctl?.finish(res.cancelled ? 'cancelled' : 'error', res.error);
+    return null;
+  }
+  const sent = res.sent ?? jobs;
+  const remaining = res.remaining ?? [];
+  const count = labelCount(sent);
+  const planned = labelCount(jobs);
+  const entry: HistoryEntry = {
     id: uid(),
-    at: doc.jobDate!,
+    at: x.resumeOf ? Date.now() : doc.jobDate!,
     name: doc.name,
     docId: doc.id,
     kind,
     count,
-    rows: doc.data?.rows.length ? jobs.map((j) => j.index) : [],
-    prompts,
-    jobs,
+    rows: doc.data?.rows.length ? sent.map((j) => j.index) : [],
+    prompts: x.prompts,
+    jobs: sent,
     opts,
     doc,
-    source: o.source,
-  });
-  return count;
+    source: x.source,
+  };
+  if (remaining.length) {
+    entry.planned = planned;
+    entry.remaining = remaining;
+  }
+  if (x.resumeOf) entry.resumeOf = x.resumeOf;
+  await recordHistory(entry);
+  // journal SSCC : numéros réservés pour ce travail mais pas (encore) envoyés
+  const a = (doc as LabelDoc & { ssccJob?: SsccAssignment }).ssccJob;
+  if (a && (remaining.length || x.resumeOf)) await markSsccNotPrinted(a, new Set(remaining.map((j) => j.index)).size);
+  x.ctl?.update({ historyId: entry.id, sent: count, total: planned });
+  if (remaining.length) x.ctl?.finish(res.cancelled ? 'cancelled' : 'error', t('{n} étiquette(s) sur {t} envoyée(s)', { n: count, t: planned }) + (res.error ? ' — ' + res.error : ''));
+  return { count, planned, historyId: entry.id };
+}
+
+/** Entrée du journal SSCC, avec le champ optionnel ajouté pour les travaux incomplets */
+export type SsccLogEntryExt = SsccLogEntry & {
+  /** nombre de SSCC de la plage (les derniers) réservés pour le travail mais non envoyés ; absent = tous envoyés */
+  notPrinted?: number;
+};
+
+/**
+ * Note dans le journal SSCC combien de numéros de la plage d'un travail ont été réservés
+ * mais pas envoyés (0 = retire la mention). Champ optionnel : les anciennes entrées
+ * restent valides. Un échec d'écriture est sans conséquence sur l'impression.
+ */
+async function markSsccNotPrinted(a: SsccAssignment, notPrinted: number) {
+  try {
+    await kvUpdate<SsccLogEntryExt[]>(LOG_KEY, (old) => {
+      const list = Array.isArray(old) ? old : [];
+      const e = list.find((x) => x.prefix === a.prefix && x.extension === a.extension && x.start === a.start);
+      if (e) {
+        if (notPrinted > 0) e.notPrinted = notPrinted;
+        else delete e.notPrinted;
+      }
+      return list;
+    });
+  } catch {
+    /* journal indisponible : la mention manque, l'historique garde le détail */
+  }
 }
 
 /** Inscrit un travail réussi dans l'historique ; un échec d'écriture est signalé sans annuler le travail. */
@@ -506,15 +637,72 @@ export async function reprint(e: HistoryEntry): Promise<boolean> {
     useStore.getState().toast(err, 'error');
     return false;
   }
-  let ok = false;
-  try {
-    ok = await executeJob(e.doc, e.kind, e.jobs, e.opts, false);
-  } catch (err) {
-    if (isCancelled(err)) useStore.getState().toast(t('Opération annulée'), 'info');
-    else useStore.getState().toast(t('Erreur : {m}', { m: (err as Error).message }), 'error');
+  const run = async (ctl?: QueueCtl) => {
+    let res: ExecResult = { ok: false };
+    try {
+      res = await executeJobDetailed(e.doc, e.kind, e.jobs, e.opts, false, ctl);
+    } catch (err) {
+      if (isCancelled(err)) useStore.getState().toast(t('Opération annulée'), 'info');
+      else useStore.getState().toast(t('Erreur : {m}', { m: (err as Error).message }), 'error');
+    }
+    if (!res.ok) {
+      ctl?.finish(res.cancelled ? 'cancelled' : 'error', res.error);
+      return false;
+    }
+    const sent = res.sent ?? e.jobs;
+    const remaining = res.remaining ?? [];
+    const entry: HistoryEntry = { ...e, id: uid(), at: Date.now(), reprintOf: e.id };
+    // réimpression partielle (Zebra interrompu) : l'entrée décrit ce qui est réellement parti
+    if (res.sent) {
+      entry.count = labelCount(sent);
+      entry.jobs = sent;
+      entry.rows = e.rows.length ? sent.map((j) => j.index) : [];
+    }
+    delete entry.planned;
+    delete entry.remaining;
+    delete entry.resumeOf;
+    if (remaining.length) {
+      entry.planned = labelCount(e.jobs);
+      entry.remaining = remaining;
+      ctl?.finish(res.cancelled ? 'cancelled' : 'error', t('{n} étiquette(s) sur {t} envoyée(s)', { n: entry.count, t: entry.planned }));
+    }
+    await recordHistory(entry);
+    ctl?.update({ historyId: entry.id });
+    return true;
+  };
+  if (QUEUED_KINDS.has(e.kind)) return (await enqueue({ name: e.name, kind: e.kind, source: t('réimpression'), total: labelCount(e.jobs) }, run)) ?? false;
+  return run();
+}
+
+/** Étiquettes d'un travail de l'historique à partir de l'étiquette n° `from` (1 = la première), envoyées ou non */
+export function resumeJobs(e: HistoryEntry, from: number): PrintJob[] {
+  return mergeJobs(skipLabels([...e.jobs, ...(e.remaining ?? [])], Math.max(1, Math.floor(from)) - 1));
+}
+
+/** Nombre total d'étiquettes prévues d'une entrée (envoyées + restantes) */
+export const plannedCount = (e: HistoryEntry) => e.planned ?? labelCount([...e.jobs, ...(e.remaining ?? [])]);
+
+/**
+ * Reprend un travail incomplet à partir de l'étiquette n° `from` (par défaut : la première
+ * non envoyée). Même document, mêmes valeurs saisies, même date, mêmes SSCC (la plage du
+ * travail lui reste attribuée) ; la numérotation n'avance pas. Nouvelle entrée d'historique
+ * (resumeOf = entrée d'origine).
+ */
+export async function resumeHistory(e: HistoryEntry, from = e.count + 1): Promise<JobOutcome | null> {
+  const st = useStore.getState();
+  const jobs = resumeJobs(e, from);
+  if (!jobs.length) {
+    st.toast(t('Rien à reprendre : le travail ne compte que {n} étiquette(s).', { n: plannedCount(e) }), 'error');
+    return null;
   }
-  if (ok) await recordHistory({ ...e, id: uid(), at: Date.now(), reprintOf: e.id });
-  return ok;
+  const err = promptValuesError(e.doc, e.doc.promptValues ?? e.prompts ?? {});
+  if (err) {
+    st.toast(err, 'error');
+    return null;
+  }
+  const exec = (ctl?: QueueCtl) => runPrepared(e.doc, e.kind, jobs, e.opts, { ctl, prompts: e.prompts, source: e.source, advanceSerial: false, resumeOf: e.id });
+  if (QUEUED_KINDS.has(e.kind)) return enqueue({ name: e.name, kind: e.kind, source: t('reprise'), total: labelCount(jobs) }, exec);
+  return exec();
 }
 
 /** Document d'un travail, sans les valeurs propres au travail (pour l'ouvrir dans l'éditeur) */

@@ -213,12 +213,23 @@ describe('SSCC — journal CSV', () => {
     const csv = ssccLogCsv(await listSsccLog());
     expect(csv.startsWith('﻿')).toBe(true);
     const lines = csv.slice(1).trim().split('\r\n');
-    expect(lines[0]).toBe('Date;Document;Travail;SSCC;Ligne / étiquette;Plage');
+    // colonne « Réservé non imprimé » ajoutée en fin de ligne : les colonnes existantes ne bougent pas
+    expect(lines[0]).toBe('Date;Document;Travail;SSCC;Ligne / étiquette;Plage;Réservé non imprimé');
     expect(lines).toHaveLength(4);
     expect(lines[1]).toContain('"Palette; quai 3"');
-    expect(lines[1].split(';').slice(-4)).toEqual(['zpl-fichier', '(00)' + composeSscc(0, '3012345', 0), '1', `${composeSscc(0, '3012345', 0)}-${composeSscc(0, '3012345', 1)}`]);
+    expect(lines[1].split(';').slice(-5)).toEqual(['zpl-fichier', '(00)' + composeSscc(0, '3012345', 0), '1', `${composeSscc(0, '3012345', 0)}-${composeSscc(0, '3012345', 1)}`, '']);
     expect(lines[2]).toContain(';(00)' + composeSscc(0, '3012345', 1) + ';3;');
     expect(lines[3]).toContain(';(00)' + composeSscc(0, '3012345', 2) + ';6;');
     expect(lines[1]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2};/);
+  });
+
+  it('SSCC réservés non imprimés (notPrinted) : « oui » sur les derniers SSCC de la plage', async () => {
+    await saveSsccSettings({ prefix: '3012345' });
+    await withSsccRange([0, 1, 2], meta, async () => true);
+    const [e] = await listSsccLog();
+    const lines = ssccLogCsv([{ ...e, notPrinted: 2 }]).slice(1).trim().split('\r\n');
+    expect(lines.slice(1).map((l) => l.split(';').pop())).toEqual(['', 'oui', 'oui']);
+    // entrée ancienne, sans le champ : colonne vide
+    expect(ssccLogCsv([e]).slice(1).trim().split('\r\n').slice(1).map((l) => l.split(';').pop())).toEqual(['', '', '']);
   });
 });

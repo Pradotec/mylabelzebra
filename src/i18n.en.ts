@@ -1,3 +1,7 @@
+import { EN_DATA } from './i18n.en.data';
+import { EN_EDITOR } from './i18n.en.editor';
+import { EN_PRINT } from './i18n.en.print';
+
 /** Dictionnaire anglais : clé = texte français utilisé dans le code. */
 export const EN: Record<string, string> = {
   '(copie)': '(copy)',
@@ -1152,4 +1156,9 @@ export const EN: Record<string, string> = {
   Échap: 'Esc',
   'Double-clic': 'Double-click',
   'Alt + clic': 'Alt + click',
+  'Ce fichier vient d’une version plus récente de MyLabelZebra (format {v}, format actuel {cur}) : il est ouvert au mieux, vérifiez l’étiquette avant d’imprimer.': 'This file comes from a newer version of MyLabelZebra (format {v}, current format {cur}): it was opened on a best-effort basis, check the label before printing.',
+  '{n} élément(s) d’un type inconnu ({types}) ne sont pas affichés ; ils sont conservés à l’export.': '{n} element(s) of an unknown type ({types}) are not displayed; they are kept when exporting.',
+  ...EN_DATA,
+  ...EN_EDITOR,
+  ...EN_PRINT,
 };

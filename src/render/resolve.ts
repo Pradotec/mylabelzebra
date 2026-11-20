@@ -1,5 +1,5 @@
 import type { LabelDoc, LabelElement, NumberingConfig, ShowCondition } from '../types';
-import { qrPayload, priceCheck4 } from './codes';
+import { qrPayload, priceCheck4, gs1Check } from './codes';
 import { getLastPrompts, parsePromptOption, mergePromptSpec, type PromptOption, type PromptSpec } from '../prompts';
 import { composeSscc, ssccPreview, type SsccDoc } from '../sscc';
 
@@ -225,6 +225,10 @@ export const FILTERS: { name: string; example: string; help: string }[] = [
   { name: 'remplacer', example: '{{ref|remplacer:-:/}}', help: 'Remplace un texte par un autre' },
   { name: 'chiffres', example: '{{poids|nombre:3|chiffres}}', help: 'Ne garde que les chiffres' },
   { name: 'cleprix', example: '{{prix|nombre:2|chiffres|pad:4|cleprix}}', help: 'EAN-13 prix variable : ajoute la clé prix devant 4 chiffres' },
+  { name: 'partie', example: '{{Emplacement|partie:4,-}}', help: 'N-ième morceau après découpage par le séparateur (1 = premier, négatif = depuis la fin) ; séparateur omis = espaces' },
+  { name: 'extraire', example: '{{Ref|extraire:^[^ (]+}}', help: 'Première correspondance de l’expression régulière (groupe 1 s’il existe), vide sinon' },
+  { name: 'clegtin', example: '{{code|clegtin}}', help: 'Ajoute la clé de contrôle GS1 à 7, 11, 12, 13 ou 17 chiffres (EAN-8, UPC, EAN-13, GTIN-14, SSCC)' },
+  { name: 'controle', example: '{{Emplacement|controle:2}}', help: 'N chiffres de contrôle stables (1 à 4, défaut 2) calculés à partir de la valeur : check digits d’emplacement' },
 ];
 const FILTER_NAMES = new Set(FILTERS.map((f) => f.name));
 const ALIASES: Record<string, string> = {
@@ -341,6 +345,61 @@ export function calcExpr(expr: string, x: number): number {
   }
 }
 
+/**
+ * Filtre « partie:N,SEP » : N-ième morceau (1 = premier, -1 = dernier) après découpage
+ * par SEP, espaces retirés. SEP = tout ce qui suit la première virgule (« partie:2,, »
+ * découpe aux virgules) ; entre guillemets pour un séparateur avec espaces (« partie:2," - " ») ;
+ * omis ou vide = suite d'espaces. Morceau inexistant → vide ; N illisible → undefined.
+ */
+export function partOf(value: string, arg: string): string | undefined {
+  const i = arg.indexOf(',');
+  const n = parseInt((i < 0 ? arg : arg.slice(0, i)).trim(), 10);
+  if (isNaN(n)) return undefined;
+  let sep = i < 0 ? '' : arg.slice(i + 1);
+  const q = /^\s*(["'])(.*)\1\s*$/.exec(sep);
+  if (q) sep = q[2];
+  const parts = sep === '' || (!q && sep.trim() === '') ? value.trim().split(/\s+/) : value.split(sep);
+  const k = n > 0 ? n - 1 : n < 0 ? parts.length + n : -1;
+  return k >= 0 && k < parts.length ? parts[k].trim() : '';
+}
+
+const regexCache = new Map<string, RegExp | null>();
+/** Expression régulière compilée une fois (null si invalide) */
+function cachedRegex(src: string): RegExp | null {
+  let re = regexCache.get(src);
+  if (re === undefined) {
+    try {
+      re = new RegExp(src);
+    } catch {
+      re = null;
+    }
+    if (regexCache.size > 200) regexCache.clear();
+    regexCache.set(src, re);
+  }
+  return re;
+}
+
+/** Corps de code GS1 sans clé : EAN-8 (7), UPC-A (11), EAN-13 (12), GTIN-14 (13), SSCC (17) */
+const GTIN_BODY = /^(\d{7}|\d{11,13}|\d{17})$/;
+
+/**
+ * Chiffres de contrôle d'emplacement (filtre « controle:N », picking vocal) : hash FNV-1a
+ * 32 bits des octets UTF-8 de la valeur sans espaces autour, modulo 10^N, complété par des
+ * zéros devant. N borné entre 1 et 4. Valeur vide → vide. Reproductible dans tout langage :
+ * h = 2166136261 ; pour chaque octet b : h = (h XOR b) × 16777619 mod 2^32.
+ */
+export function checkDigits(value: string, n = 2): string {
+  const x = value.trim();
+  if (!x) return '';
+  const k = Math.max(1, Math.min(4, Math.round(n)));
+  let h = 0x811c9dc5;
+  for (const b of new TextEncoder().encode(x)) {
+    h ^= b;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return String(h % 10 ** k).padStart(k, '0');
+}
+
 function applyFilter(v: Val, f: Filter, ctx: ResolveCtx): Val {
   const doc = ctx.doc;
   const s = () => asStr(v, doc);
@@ -434,6 +493,22 @@ function applyFilter(v: Val, f: Filter, ctx: ResolveCtx): Val {
       const x = s().replace(/\D/g, '');
       return x.length ? String(priceCheck4(x)) + x.padStart(4, '0').slice(-4) : v;
     }
+    case 'partie':
+      return partOf(s(), f.arg) ?? v;
+    case 'extraire': {
+      const re = cachedRegex(f.arg);
+      if (!re) return v;
+      const m = re.exec(s());
+      return m ? (m.length > 1 ? (m[1] ?? '') : m[0]) : '';
+    }
+    case 'clegtin': {
+      const x = s().trim();
+      return GTIN_BODY.test(x) ? x + gs1Check(x) : v;
+    }
+    case 'controle': {
+      const n = f.arg.trim() === '' ? 2 : parseInt(f.arg, 10);
+      return isNaN(n) ? v : checkDigits(s(), n);
+    }
     default:
       return v; // filtre inconnu : valeur inchangée (signalé dans l'éditeur)
   }
@@ -506,6 +581,34 @@ const isSerialKey = (lower: string) => lower === 'numero' || lower === 'numéro'
 /** {{#pos}} position dans le travail, {{#total}} nombre d'étiquettes du travail (colis « 1/N ») */
 const isPosKey = (lower: string) => lower === '#pos' || lower === '#colis';
 const isTotalKey = (lower: string) => lower === '#total' || lower === '#nb';
+
+/**
+ * La clé désigne-t-elle un champ calculé (numéro, position, SSCC, date, saisie) plutôt
+ * qu'une colonne de données ?
+ */
+export function isSpecialKey(key: string): boolean {
+  const lower = key.trim().toLowerCase();
+  return (
+    isSerialKey(lower) ||
+    isPosKey(lower) ||
+    isTotalKey(lower) ||
+    lower === '#sscc' ||
+    /^date\s*([+-]\s*\d+)?$/i.test(lower) ||
+    /^(aujourd'?hui|aujourd’hui|today|maintenant)$/i.test(lower) ||
+    promptName(key) != null
+  );
+}
+
+/** Clé testée par une condition d'affichage (« lot », « {{poids|arrondi:0}} » → « poids ») */
+export function conditionKey(c: ShowCondition): string {
+  return c.field ? parseToken(stripBraces(c.field)).key : '';
+}
+
+/** Clés des {{champs}} d'un texte, dans l'ordre (doublons compris) */
+export function fieldKeys(text: string): string[] {
+  if (!text || text.indexOf('{{') < 0) return [];
+  return Array.from(text.matchAll(TOKEN), (m) => parseToken(m[1]).key);
+}
 
 /** Valeur brute d'une clé ; undefined = clé inconnue sans ligne de données */
 function keyValue(key: string, ctx: ResolveCtx, filtered: boolean): Val | undefined {

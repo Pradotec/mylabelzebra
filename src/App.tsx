@@ -260,6 +260,36 @@ function useShortcuts() {
         if (k === 'h' && !e.repeat) return e.preventDefault(), useStore.setState({ hand: !st.hand });
         if (k === 'v' && !e.repeat) return st.hand ? (e.preventDefault(), useStore.setState({ hand: false })) : undefined;
       }
+      // Tab / Maj+Tab : élément suivant / précédent (ordre des calques), seulement quand le focus
+      // n'est pas sur un contrôle ; au-delà du dernier, la sélection est vidée et Tab reprend son
+      // rôle normal (pas de piège au clavier)
+      if (k === 'tab' && !mod && !e.altKey && !st.editingTextId && !st.preview && !isInteractiveTarget(tg) && !tg?.closest?.('.panel, .menu')) {
+        if (st.selectStep(e.shiftKey ? -1 : 1)) e.preventDefault();
+        return;
+      }
+      // mise en forme : Ctrl+Alt+C copie, Ctrl+Alt+V applique (avant Ctrl+C / Ctrl+V)
+      if (mod && e.altKey && !e.shiftKey && (k === 'c' || e.code === 'KeyC')) {
+        e.preventDefault();
+        if (st.copyStyle()) st.toast(t('Mise en forme copiée'), 'ok');
+        return;
+      }
+      if (mod && e.altKey && !e.shiftKey && (k === 'v' || e.code === 'KeyV')) {
+        e.preventDefault();
+        if (!st.styleClip) return st.toast(t('Aucune mise en forme copiée (Ctrl+Alt+C sur un élément).'), 'error');
+        if (!st.selected.length) return;
+        const n = st.pasteStyle();
+        if (!n) st.toast(t('Mise en forme non applicable : aucun élément sélectionné du même type.'), 'error');
+        return;
+      }
+      // plans : Ctrl+] / Ctrl+[ (touches physiques, donc Ctrl+$ / Ctrl+^ en AZERTY), Maj : premier / arrière-plan
+      const plane = e.code === 'BracketRight' || k === ']' || k === '}' ? 'up' : e.code === 'BracketLeft' || k === '[' || k === '{' ? 'down' : null;
+      if (mod && plane) {
+        if (!st.selected.length) return;
+        e.preventDefault();
+        return st.reorder(st.selected, e.shiftKey ? (plane === 'up' ? 'front' : 'back') : plane);
+      }
+      if (mod && e.shiftKey && !e.altKey && k === 'l') return st.selected.length ? (e.preventDefault(), st.toggleLockSelected()) : undefined;
+      if (mod && e.shiftKey && !e.altKey && k === 'h') return st.selected.length ? (e.preventDefault(), st.toggleHiddenSelected()) : undefined;
       if (mod && k === 'z' && !e.shiftKey) return e.preventDefault(), st.undo();
       if (mod && (k === 'y' || (k === 'z' && e.shiftKey))) return e.preventDefault(), st.redo();
       if (mod && k === 'c') return st.selected.length ? (e.preventDefault(), st.copySelected()) : undefined;
@@ -290,6 +320,13 @@ function useShortcuts() {
       }
       const step = e.shiftKey ? 10 : 1;
       const arrows: Record<string, [number, number]> = { arrowleft: [-step, 0], arrowright: [step, 0], arrowup: [0, -step], arrowdown: [0, step] };
+      // Alt+flèche : copie de la sélection décalée d'un pas de grille (au lieu de Précédente / Suivante du navigateur)
+      if (arrows[k] && e.altKey && !mod && st.selected.length) {
+        e.preventDefault();
+        const g = st.grid.size;
+        const [dx, dy] = arrows[k];
+        return st.duplicateBy(Math.sign(dx) * g, Math.sign(dy) * g);
+      }
       if (arrows[k] && st.selected.length) {
         e.preventDefault();
         nudge(...arrows[k]);

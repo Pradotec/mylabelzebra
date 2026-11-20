@@ -1,0 +1,31 @@
+{
+  "id": "fixture-doc-nu",
+  "name": "Fixture doc nu",
+  "widthIn": 2.25,
+  "heightIn": 1.25,
+  "dpi": 203,
+  "background": "#ffffff",
+  "elements": [
+    {
+      "id": "t1",
+      "type": "text",
+      "x": 10, "y": 10, "w": 400, "h": 50, "rotation": 0,
+      "text": "Ancien fichier {{?Poids}} kg",
+      "fontFamily": "Arial", "fontSize": 28, "bold": false, "italic": false,
+      "align": "left", "lineHeight": 1.1, "color": "#000000", "invert": false,
+      "autoShrink": true
+    },
+    {
+      "id": "b1",
+      "type": "barcode",
+      "x": 10, "y": 80, "w": 380, "h": 120,
+      "value": "1234567890128", "symbology": "ean13", "showText": true, "fontSize": 22, "color": "#000000"
+    },
+    {
+      "type": "mark", "kind": "health",
+      "x": 300, "y": 10, "w": 150, "h": 100, "rotation": 0
+    }
+  ],
+  "numbering": { "start": 7 },
+  "zplRaster": true
+}

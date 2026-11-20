@@ -154,6 +154,53 @@ export async function getStatus(device: ZebraDevice): Promise<PrinterStatus> {
   return parseHostStatus(await query(device, '~HS'));
 }
 
+/**
+ * Réponse ~HS exploitable : au moins les deux premières chaînes, chacune avec assez de
+ * champs. Sinon (réponse vide ou tronquée — Browser Print ne relaie pas toujours la
+ * lecture), l'état est « inconnu » : on ne conclut ni « prête » ni « en erreur ».
+ */
+export function isStatusReadable(s: PrinterStatus): boolean {
+  const lines = s.raw
+    .split(/[\x02\x03\r\n]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  return lines.length >= 2 && lines[0].split(',').length >= 3 && lines[1].split(',').length >= 4;
+}
+
+/** Problèmes signalés par ~HS, en clair (textes français, à passer par t()) */
+export function statusProblems(s: PrinterStatus): string[] {
+  const out: string[] = [];
+  if (s.paperOut) out.push('Plus de papier');
+  if (s.ribbonOut) out.push('Plus de ruban');
+  if (s.headOpen) out.push('Tête ouverte');
+  if (s.paused) out.push('En pause');
+  return out;
+}
+
+export type Readiness =
+  | { state: 'ready'; status: PrinterStatus }
+  /** l'imprimante signale un problème (problems : textes français) */
+  | { state: 'notReady'; status: PrinterStatus; problems: string[] }
+  /** état illisible : pas de réponse exploitable à ~HS */
+  | { state: 'unknown'; error?: string };
+
+/**
+ * Vérifie que l'imprimante est prête (~HS). Ne lève pas : une erreur de lecture donne
+ * « unknown ». Seuls les indicateurs documentés de ~HS sont utilisés (papier, pause,
+ * tête ouverte, ruban) ; aucun autre état n'est déduit.
+ */
+export async function checkReady(device: ZebraDevice): Promise<Readiness> {
+  let status: PrinterStatus;
+  try {
+    status = await getStatus(device);
+  } catch (e) {
+    return { state: 'unknown', error: (e as Error)?.message || String(e) };
+  }
+  if (!isStatusReadable(status)) return { state: 'unknown' };
+  const problems = statusProblems(status);
+  return problems.length ? { state: 'notReady', status, problems } : { state: 'ready', status };
+}
+
 export function parseSettings(hi: string, hh: string): PrinterSettings {
   const s: PrinterSettings = {};
   const dm = /(\d{3})\s*dpi/i.exec(hi) || /(\d{3})\s*DPI/.exec(hh);

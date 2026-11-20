@@ -13,7 +13,7 @@ function load() {
     { ...makeText(d, 'bonjour'), id: 'b', x: 100, y: 10 },
   ];
   S().loadDoc(d);
-  useStore.setState({ ready: true, dirty: false, selected: [], past: [], future: [], lastKey: undefined, lastTime: 0 });
+  useStore.setState({ ready: true, dirty: false, selected: [], past: [], future: [], lastKey: undefined, lastTime: 0, styleClip: null });
 }
 
 beforeEach(() => {
@@ -137,6 +137,184 @@ describe('dupliquer / copier', () => {
     S().copySelected();
     await new Promise((r) => setTimeout(r, 0));
     expect(lastCopiedSystemText()).toBeNull();
+  });
+});
+
+describe('copier / coller la mise en forme', () => {
+  function withTexts() {
+    const d = S().doc;
+    S().addElements(
+      [
+        { ...makeText(d, 'source'), id: 's', x: 5, y: 6, w: 77, fontSize: 40, bold: true, italic: true, underline: true, color: '#d43b2a', align: 'right' },
+        { ...makeText(d, 'cible'), id: 't', x: 300, y: 50, w: 120, fontSize: 12, bold: false, underline: undefined },
+      ],
+      false,
+    );
+    useStore.setState({ past: [] });
+  }
+
+  it('copie la mise en forme sans le contenu, la position ni la taille', () => {
+    withTexts();
+    S().select(['s']);
+    expect(S().copyStyle()).toBe(true);
+    const clip = S().styleClip!;
+    expect(clip.type).toBe('text');
+    expect(clip.style).toMatchObject({ fontSize: 40, bold: true, color: '#d43b2a', align: 'right' });
+    for (const k of ['text', 'x', 'y', 'w', 'h', 'id', 'rotation']) expect(clip.style).not.toHaveProperty(k);
+  });
+
+  it('sans sélection, rien n’est copié', () => {
+    expect(S().copyStyle()).toBe(false);
+    expect(S().styleClip).toBeNull();
+  });
+
+  it('applique aux seuls éléments du même type, en une étape d’annulation', () => {
+    withTexts();
+    S().select(['s']);
+    S().copyStyle();
+    S().select(['t', 'a']); // « a » est une forme : ignorée
+    expect(S().pasteStyle()).toBe(1);
+    const t = S().doc.elements.find((e) => e.id === 't')!;
+    expect(t).toMatchObject({ text: 'cible', x: 300, y: 50, w: 120, fontSize: 40, bold: true, italic: true, underline: true, color: '#d43b2a', align: 'right' });
+    const a = S().doc.elements.find((e) => e.id === 'a')!;
+    expect(a).toMatchObject({ x: 10, y: 10 });
+    expect(S().past).toHaveLength(1);
+    S().undo();
+    expect(S().doc.elements.find((e) => e.id === 't')).toMatchObject({ fontSize: 12, bold: false });
+  });
+
+  it('efface les propriétés absentes de la source', () => {
+    withTexts();
+    S().updateEls(['s'], { underline: undefined });
+    S().updateEls(['t'], { underline: true });
+    S().select(['s']);
+    S().copyStyle();
+    S().select(['t']);
+    S().pasteStyle();
+    expect(S().doc.elements.find((e) => e.id === 't')!).toMatchObject({ underline: undefined });
+  });
+
+  it('aucun élément compatible : rien ne change', () => {
+    withTexts();
+    S().select(['s']);
+    S().copyStyle();
+    S().select(['a']);
+    expect(S().pasteStyle()).toBe(0);
+    expect(S().past).toHaveLength(0);
+  });
+
+  it('formes : l’arrondi ne s’applique qu’aux rectangles', () => {
+    const d = S().doc;
+    S().addElements([{ ...makeShape(d, 'roundrect'), id: 'r', radius: 12, fill: '#2563eb' }, { ...makeShape(d, 'ellipse'), id: 'e', fill: 'none' }], false);
+    S().select(['r']);
+    S().copyStyle();
+    S().select(['a', 'e']);
+    expect(S().pasteStyle()).toBe(2);
+    const a = S().doc.elements.find((e) => e.id === 'a')!;
+    const e = S().doc.elements.find((x) => x.id === 'e')!;
+    expect(a).toMatchObject({ kind: 'roundrect', radius: 12, fill: '#2563eb' });
+    expect(e).toMatchObject({ kind: 'ellipse', fill: '#2563eb' });
+    expect(e).not.toHaveProperty('radius', 12);
+  });
+});
+
+describe('élément suivant / précédent (Tab)', () => {
+  // ordre des calques : du premier plan (dernier élément) vers l'arrière-plan
+  it('sans sélection, sélectionne le premier (ou le dernier en arrière)', () => {
+    expect(S().selectStep(1)).toBe(true);
+    expect(S().selected).toEqual(['b']);
+    useStore.setState({ selected: [] });
+    expect(S().selectStep(-1)).toBe(true);
+    expect(S().selected).toEqual(['a']);
+  });
+
+  it('avance, recule, puis vide la sélection au-delà du bout', () => {
+    S().select(['b']);
+    expect(S().selectStep(1)).toBe(true);
+    expect(S().selected).toEqual(['a']);
+    expect(S().selectStep(1)).toBe(false);
+    expect(S().selected).toEqual([]);
+    S().select(['a']);
+    expect(S().selectStep(-1)).toBe(true);
+    expect(S().selected).toEqual(['b']);
+    expect(S().selectStep(-1)).toBe(false);
+    expect(S().selected).toEqual([]);
+  });
+
+  it('saute les éléments masqués et traite un groupe comme un seul élément', () => {
+    const d = S().doc;
+    S().addElements(
+      [
+        { ...makeText(d, 'g1'), id: 'g1', groups: ['G'] },
+        { ...makeText(d, 'g2'), id: 'g2', groups: ['G'] },
+        { ...makeText(d, 'cache'), id: 'h', hidden: true },
+      ],
+      false,
+    );
+    // ordre : h (masqué), [g2, g1], b, a
+    S().selectStep(1);
+    expect(S().selected.sort()).toEqual(['g1', 'g2']);
+    S().selectStep(1);
+    expect(S().selected).toEqual(['b']);
+    S().selectStep(-1);
+    expect(S().selected.sort()).toEqual(['g1', 'g2']);
+  });
+
+  it('ne crée pas d’étape d’annulation', () => {
+    S().selectStep(1);
+    expect(S().past).toHaveLength(0);
+  });
+});
+
+describe('dupliquer en décalant (Alt+flèche)', () => {
+  it('copie la sélection décalée, sélectionne la copie, une étape d’annulation', () => {
+    S().select(['a']);
+    S().duplicateBy(20, 0);
+    expect(S().doc.elements).toHaveLength(3);
+    const copy = S().doc.elements[2];
+    expect(copy.id).not.toBe('a');
+    expect(copy).toMatchObject({ type: 'shape', x: 30, y: 10 });
+    expect(S().selected).toEqual([copy.id]);
+    S().duplicateBy(0, -5);
+    expect(S().doc.elements[3]).toMatchObject({ x: 30, y: 5 });
+    expect(S().past).toHaveLength(2);
+    S().undo();
+    expect(S().doc.elements).toHaveLength(3);
+  });
+
+  it('sans sélection, ne fait rien', () => {
+    S().duplicateBy(10, 10);
+    expect(S().doc.elements).toHaveLength(2);
+    expect(S().past).toHaveLength(0);
+  });
+
+  it('la copie est déverrouillée', () => {
+    S().updateEls(['a'], { locked: true });
+    S().select(['a']);
+    S().duplicateBy(0, 10);
+    expect(S().doc.elements[2].locked).toBe(false);
+  });
+});
+
+describe('verrouiller / masquer / même type', () => {
+  it('bascule le verrouillage et le masquage de la sélection', () => {
+    S().select(['a', 'b']);
+    S().toggleLockSelected();
+    expect(S().doc.elements.every((e) => e.locked)).toBe(true);
+    S().toggleLockSelected();
+    expect(S().doc.elements.some((e) => e.locked)).toBe(false);
+    S().toggleHiddenSelected();
+    expect(S().doc.elements.every((e) => e.hidden)).toBe(true);
+    S().toggleHiddenSelected();
+    expect(S().doc.elements.some((e) => e.hidden)).toBe(false);
+  });
+
+  it('sélectionne les éléments visibles du même type', () => {
+    const d = S().doc;
+    S().addElements([{ ...makeText(d, 'x'), id: 'c' }, { ...makeText(d, 'y'), id: 'h', hidden: true }], false);
+    S().select(['b']);
+    S().selectSameType();
+    expect(S().selected).toEqual(['b', 'c']);
   });
 });
 

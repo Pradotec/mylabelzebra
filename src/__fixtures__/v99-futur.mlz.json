@@ -1,0 +1,42 @@
+{
+  "app": "MyLabelZebra",
+  "version": 99,
+  "doc": {
+    "id": "fixture-v99",
+    "name": "Fixture version 99",
+    "widthIn": 4,
+    "heightIn": 2,
+    "dpi": 203,
+    "background": "#ffffff",
+    "formatVersion": 99,
+    "champDuFutur": { "mode": "hologramme", "niveau": 3 },
+    "elements": [
+      {
+        "id": "a",
+        "type": "text",
+        "x": 10, "y": 10, "w": 300, "h": 40, "rotation": 0,
+        "text": "Avant",
+        "fontFamily": "Arial", "fontSize": 24, "bold": false, "italic": false,
+        "align": "left", "lineHeight": 1.1, "color": "#000000", "invert": false,
+        "fit": "wrapGrow",
+        "proprieteFuture": "conservée"
+      },
+      {
+        "id": "holo",
+        "type": "hologramme",
+        "x": 50, "y": 60, "w": 100, "h": 100, "rotation": 0,
+        "intensite": 7
+      },
+      {
+        "id": "b",
+        "type": "shape", "kind": "rect",
+        "x": 0, "y": 0, "w": 812, "h": 406, "rotation": 0,
+        "fill": "none", "stroke": "#000000", "strokeWidth": 4
+      }
+    ],
+    "numbering": { "start": 1, "step": 1, "padding": 4, "prefix": "", "suffix": "", "count": 10, "base": "futur" },
+    "date": { "format": "DD/MM/YYYY", "offsetDays": 0 },
+    "guides": { "x": [], "y": [] },
+    "zplRaster": false
+  }
+}

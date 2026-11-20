@@ -70,6 +70,14 @@ Utilisez *Fichier › Partager › Publier sur le Web*, choisissez l’onglet et
 
 Dans le navigateur (IndexedDB et localStorage), pour cette adresse précise : `http://localhost:5173`, `http://localhost:8080` et votre domaine sont trois espaces de stockage distincts. Pour transférer : *Options* → *Exporter l’étiquette* (JSON) puis *Importer une étiquette* sur l’autre poste.
 
+## Mes étiquettes exportées restent-elles compatibles après une mise à jour ?
+
+Oui. Un fichier `.mlz.json` indique la version de son format ; à l’ouverture, l’application convertit automatiquement les fichiers plus anciens, et il en va de même pour « Mes étiquettes ». Chaque mise à jour est testée sur des fichiers d’exemple des versions précédentes.
+
+Si un fichier vient d’une version **plus récente** de l’application (par exemple ouvert sur un poste qui n’a pas encore été mis à jour), il s’ouvre quand même, avec un avertissement : ce que cette version ne connaît pas n’est pas affiché, mais est conservé si vous réexportez le fichier. Vérifiez l’étiquette avant d’imprimer, ou mettez à jour l’application (voir ci-dessous).
+
+**Conseil** : gardez vos exports `.mlz.json` comme sauvegarde (*Options* → *Exporter l’étiquette*). « Mes étiquettes » vit dans le navigateur : effacer les données du site ou changer de poste les fait disparaître, pas vos fichiers.
+
 ## L’application ne se met pas à jour
 
 Le service worker sert la version en cache puis récupère la nouvelle en arrière-plan : rechargez la page une seconde fois. Côté serveur, `index.html`, `sw.js` et `manifest.webmanifest` doivent être servis en `Cache-Control: no-cache` (c’est le cas de la configuration Docker fournie).

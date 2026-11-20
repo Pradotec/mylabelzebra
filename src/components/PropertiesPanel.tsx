@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Bold,
   Italic,
@@ -220,9 +220,223 @@ function alignEls(sel: LabelElement[], mode: 'l' | 'c' | 'r' | 't' | 'm' | 'b', 
   );
 }
 
+/** Valeur différente selon les éléments sélectionnés */
+const MIX: unique symbol = Symbol('mixed');
+type Mixed<T> = T | typeof MIX;
+function same<E, T>(els: E[], f: (e: E) => T): Mixed<T> {
+  const v = f(els[0]);
+  return els.every((e) => f(e) === v) ? v : MIX;
+}
+const numOr = (v: Mixed<number>) => (v === MIX ? NaN : v);
+
+/** Case à cocher à trois états (indéterminée quand les éléments diffèrent) */
+function TriCheck({ value, onChange, children, title }: { value: Mixed<boolean>; onChange: (v: boolean) => void; children: ReactNode; title?: string }) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = value === MIX;
+  }, [value]);
+  return (
+    <label className="check" title={title}>
+      <input ref={ref} type="checkbox" checked={value === true} onChange={(e) => onChange(e.target.checked)} />
+      <span>{children}</span>
+    </label>
+  );
+}
+
+/** Couleur commune ; « — » quand elle diffère */
+function MultiColor({ label, value, onChange, allowNone }: { label: string; value: Mixed<string>; onChange: (c: string) => void; allowNone?: boolean }) {
+  return <ColorPicker label={label} allowNone={allowNone} value={value === MIX ? '—' : value} onChange={onChange} />;
+}
+
+/** Liste déroulante commune ; option « — » quand la valeur diffère */
+function MultiSelect<T extends string>({ label, value, options, onChange }: { label: string; value: Mixed<T>; options: { v: T; label: ReactNode }[]; onChange: (v: T) => void }) {
+  return (
+    <label className="f">
+      {label}
+      <select className="inp" value={value === MIX ? '' : value} onChange={(e) => e.target.value && onChange(e.target.value as T)}>
+        {value === MIX && (
+          <option value="" disabled>
+            —
+          </option>
+        )}
+        {options.map((o) => (
+          <option key={o.v} value={o.v}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/** Bouton bascule commun (gras, italique…) : actif si tous les éléments le sont */
+function MultiToggle({ on, title, icon, onChange }: { on: Mixed<boolean | undefined>; title: string; icon: ReactNode; onChange: (v: boolean) => void }) {
+  return (
+    <button className={on === true ? 'on' : ''} title={title} aria-label={title} aria-pressed={on === MIX ? 'mixed' : on === true} onClick={() => onChange(on !== true)}>
+      {icon}
+    </button>
+  );
+}
+
+/** Propriétés communes de plusieurs éléments : une modification s'applique à tous, en une étape d'annulation */
+function MultiCommon({ sel }: { sel: LabelElement[] }) {
+  const st = useStore();
+  const ids = sel.map((e) => e.id);
+  const type = same(sel, (e) => e.type);
+  const all = (p: Partial<LabelElement> | ((e: LabelElement) => Partial<LabelElement>), key?: string) => st.updateEls(ids, p, key);
+  return (
+    <>
+      {type === 'text' && <MultiTextProps els={sel as TextEl[]} all={all} />}
+      {type === 'barcode' && <MultiBarcodeProps els={sel as BarcodeEl[]} all={all} />}
+      {type === 'shape' && <MultiShapeProps els={sel as ShapeEl[]} all={all} />}
+      {type === 'qr' && (
+        <div className="grid2">
+          <MultiSelect
+            label={t('Correction d’erreur')}
+            value={same(sel as QrEl[], (e) => e.level)}
+            onChange={(v) => all({ level: v } as Partial<QrEl>)}
+            options={[
+              { v: 'L', label: 'L — 7 %' },
+              { v: 'M', label: 'M — 15 %' },
+              { v: 'Q', label: 'Q — 25 %' },
+              { v: 'H', label: 'H — 30 %' },
+            ]}
+          />
+          <MultiColor label={t('Couleur')} value={same(sel as QrEl[], (e) => e.color)} onChange={(c) => all({ color: c === 'none' ? '#000000' : c } as Partial<QrEl>)} />
+        </div>
+      )}
+      {type === 'image' && (
+        <>
+          <NumField label={t('Seuil')} decimals={0} min={10} max={245} value={numOr(same(sel as ImageEl[], (e) => e.threshold))} onChange={(v) => all({ threshold: Math.round(v) } as Partial<ImageEl>, 'mthr')} />
+          <TriCheck value={same(sel as ImageEl[], (e) => !!e.dither)} onChange={(v) => all({ dither: v } as Partial<ImageEl>)}>
+            {t('Tramage (photos, dégradés)')}
+          </TriCheck>
+        </>
+      )}
+      {type === 'table' && (
+        <div className="grid2">
+          <MultiSelect label={t('Police')} value={same(sel as TableEl[], (e) => e.fontFamily)} options={FONTS.map((f) => ({ v: f, label: f }))} onChange={(v) => all({ fontFamily: v } as Partial<TableEl>)} />
+          <NumField label={t('Taille du texte')} suffix="pt" min={4} max={300} value={numOr(same(sel as TableEl[], (e) => e.fontSize))} onChange={(v) => all({ fontSize: v } as Partial<TableEl>, 'mtfs')} />
+          <NumField label={t('Épaisseur des traits')} min={0} max={40} value={numOr(same(sel as TableEl[], (e) => e.strokeWidth))} onChange={(v) => all({ strokeWidth: v } as Partial<TableEl>, 'mtsw')} />
+        </div>
+      )}
+      {type === 'mark' && <MultiColor label={t('Couleur')} value={same(sel as MarkEl[], (e) => e.color)} onChange={(c) => all({ color: c === 'none' ? '#000000' : c } as Partial<MarkEl>)} />}
+      <div className="sec">
+        <div className="sec-t">{type === MIX ? t('Propriétés communes') : t('Disposition')}</div>
+        <NumField label={t('Rotation')} suffix="°" decimals={1} step={1} value={numOr(same(sel, (e) => e.rotation || 0))} onChange={(v) => all({ rotation: ((v % 360) + 360) % 360 }, 'mrot')} />
+        <TriCheck value={same(sel, (e) => !!e.locked)} onChange={(v) => all({ locked: v })}>
+          {t('Verrouiller (empêche de déplacer)')}
+        </TriCheck>
+      </div>
+    </>
+  );
+}
+
+type AllFn = (p: Partial<LabelElement> | ((e: LabelElement) => Partial<LabelElement>), key?: string) => void;
+
+function MultiTextProps({ els, all }: { els: TextEl[]; all: AllFn }) {
+  const st = useStore();
+  const set = (p: Partial<TextEl>, key?: string) => all(p as Partial<LabelElement>, key);
+  const align = same(els, (e) => e.align);
+  const setFit = (v: TextFit) => {
+    const ctx = { doc: st.doc, index: st.previewRow, row: st.doc.data?.rows[st.previewRow], resolve: true };
+    all((e) => {
+      const el = e as TextEl;
+      const patch: Partial<TextEl> = { fit: v, autoShrink: undefined };
+      // comme pour un seul texte : en quittant « illimité », on garde la hauteur actuelle du contenu
+      if (v !== 'wrapGrow' && fitMode(el) === 'wrapGrow') patch.h = Math.max(layoutText(el, elText(el, ctx), st.doc.allergensExtra).h, el.fontSize * (el.lineHeight || 1.1));
+      return patch as Partial<LabelElement>;
+    });
+  };
+  return (
+    <div className="sec">
+      <div className="sec-t">{t('Texte')}</div>
+      <div className="grid2">
+        <MultiSelect label={t('Police')} value={same(els, (e) => e.fontFamily)} options={FONTS.map((f) => ({ v: f, label: f }))} onChange={(v) => set({ fontFamily: v })} />
+        <NumField label={t('Taille')} suffix="pt" decimals={1} min={4} max={2000} value={numOr(same(els, (e) => e.fontSize))} onChange={(v) => set({ fontSize: v }, 'mfs')} />
+      </div>
+      <div className="row">
+        <Seg
+          value={(align === MIX ? '' : align) as TextEl['align']}
+          onChange={(v) => set({ align: v })}
+          options={[
+            { v: 'left', label: <AlignLeft size={15} />, title: t('Gauche') },
+            { v: 'center', label: <AlignCenter size={15} />, title: t('Centré') },
+            { v: 'right', label: <AlignRight size={15} />, title: t('Droite') },
+            { v: 'justify', label: <AlignJustify size={15} />, title: t('Justifié') },
+          ]}
+        />
+        <div className="seg">
+          <MultiToggle on={same(els, (e) => !!e.bold)} title={t('Gras')} icon={<Bold size={15} />} onChange={(v) => set({ bold: v })} />
+          <MultiToggle on={same(els, (e) => !!e.italic)} title={t('Italique')} icon={<Italic size={15} />} onChange={(v) => set({ italic: v })} />
+          <MultiToggle on={same(els, (e) => !!e.underline)} title={t('Souligné')} icon={<Underline size={15} />} onChange={(v) => set({ underline: v })} />
+        </div>
+      </div>
+      <div className="grid2">
+        <MultiColor label={t('Couleur')} value={same(els, (e) => e.color)} onChange={(c) => set({ color: c === 'none' ? '#000000' : c }, 'mcolor')} />
+        <NumField label={t('Interligne')} decimals={2} step={0.05} min={0.6} max={4} value={numOr(same(els, (e) => e.lineHeight))} onChange={(v) => set({ lineHeight: v }, 'mlh')} />
+      </div>
+      <TriCheck value={same(els, (e) => !!e.invert)} onChange={(v) => set({ invert: v })}>
+        {t('Inverser (texte blanc sur fond noir)')}
+      </TriCheck>
+      <MultiSelect label={t('Ajustement du texte')} value={same(els, (e) => fitMode(e))} options={FIT_OPTIONS.map((o) => ({ v: o.v, label: t(o.label) }))} onChange={setFit} />
+    </div>
+  );
+}
+
+function MultiBarcodeProps({ els, all }: { els: BarcodeEl[]; all: AllFn }) {
+  const set = (p: Partial<BarcodeEl>, key?: string) => all(p as Partial<LabelElement>, key);
+  const showText = same(els, (e) => !!e.showText);
+  const linear = els.some((e) => !is2D(e.symbology));
+  return (
+    <div className="sec">
+      <div className="sec-t">{t('Code-barres')}</div>
+      <MultiSelect
+        label={t('Symbologie')}
+        value={same(els, (e) => e.symbology)}
+        options={SYMBOLOGIES.map((s) => ({ v: s.id, label: s.label }))}
+        onChange={(s) =>
+          all((e) => {
+            const el = e as BarcodeEl;
+            // même règle que pour un seul code : valeur conservée si elle reste valide (ou contient un champ)
+            const ok = encodeBarcode(el.value, s).error === undefined || /\{\{/.test(el.value);
+            return { ...symbologyPatch(el, s), value: ok ? el.value : SYMBOLOGIES.find((x) => x.id === s)!.sample } as Partial<LabelElement>;
+          })
+        }
+      />
+      {linear && (
+        <>
+          <TriCheck value={showText} onChange={(v) => set({ showText: v })}>
+            {t('Afficher le texte lisible')}
+          </TriCheck>
+          {showText !== false && <NumField label={t('Taille du texte')} suffix="pt" min={6} max={200} value={numOr(same(els, (e) => e.fontSize))} onChange={(v) => set({ fontSize: v }, 'mbfs')} />}
+        </>
+      )}
+      <div style={{ marginTop: 8 }}>
+        <MultiColor label={t('Couleur')} value={same(els, (e) => e.color)} onChange={(c) => set({ color: c === 'none' ? '#000000' : c })} />
+      </div>
+    </div>
+  );
+}
+
+function MultiShapeProps({ els, all }: { els: ShapeEl[]; all: AllFn }) {
+  const set = (p: Partial<ShapeEl>, key?: string) => all(p as Partial<LabelElement>, key);
+  return (
+    <div className="sec">
+      <div className="sec-t">{t('Forme')}</div>
+      <div className="grid2">
+        <MultiColor label={t('Remplissage')} allowNone value={same(els, (e) => e.fill)} onChange={(c) => set({ fill: c })} />
+        <MultiColor label={t('Bordure')} allowNone value={same(els, (e) => e.stroke)} onChange={(c) => set({ stroke: c })} />
+      </div>
+      <NumField label={t('Épaisseur de bordure')} min={0} max={200} value={numOr(same(els, (e) => e.strokeWidth))} onChange={(v) => set({ strokeWidth: v }, 'msw')} />
+    </div>
+  );
+}
+
 function MultiProps({ sel }: { sel: LabelElement[] }) {
   return (
     <>
+      <MultiCommon sel={sel} />
       <div className="sec">
         <div className="sec-t">{t('Aligner entre eux')}</div>
         <AlignTools onAlign={(m) => alignEls(sel, m, false)} />

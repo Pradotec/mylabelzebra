@@ -5,3 +5,9 @@ dist/
 .DS_Store
 .vscode/
 *.local
+
+# Étiquettes et données exportées par l’app (peuvent contenir des données réelles)
+*.mlz.json
+!src/__fixtures__/*.mlz.json
+*.csv
+*.xlsx

@@ -25,6 +25,7 @@ src/
 ├── store.ts                état global (zustand) : document, sélection, annuler/rétablir (80 états)
 ├── types.ts                modèle de document (LabelDoc, éléments, données, réglages)
 ├── elements.ts             création / normalisation des éléments
+├── migrate.ts              version du format de fichier, migrations (voir « Format de fichier et compatibilité »)
 ├── actions.ts              actions de haut niveau (Mes étiquettes, import JSON, insertion de champs…)
 ├── storage.ts              stockage clé/valeur IndexedDB (repli localStorage), erreurs de quota
 ├── data.ts                 import CSV/TSV/Excel/ODS/Google Sheets, encodage, avertissements
@@ -84,6 +85,27 @@ Principes :
 - **ZPL hybride** : un élément est écrit en commande native quand le résultat est fidèle à l’écran (police sans-serif, pas de rotation, texte qui ne frôle pas le bord…), sinon il est rendu par `draw.ts` puis converti en `^GFA` (seuil, tramage de Bayer 8×8 pour les gris). L’option « tout en image » rasterise l’étiquette entière — c’est aussi le rendu de l’aperçu thermique.
 - **Résolution des champs par ligne** : chaque sortie appelle `resolve.ts` avec un contexte (index, ligne, document). Un travail fige une copie du document (`jobDoc`) avec les valeurs saisies, la date de référence et la plage SSCC, conservée dans l’historique pour une réimpression à l’identique.
 - **Chargement à la demande** : jsPDF, JSZip, SheetJS et pdf.js sont importés dynamiquement ; bwip-js, Konva, React et les icônes sont séparés en fichiers `vendor-*` (voir `vite.config.ts`).
+
+## Format de fichier et compatibilité
+
+Les étiquettes vivent longtemps hors de l’application : fichiers `.mlz.json` exportés, « Mes étiquettes » et document courant dans IndexedDB, modèles appelés par l’impression pilotée. Chaque mise à jour doit savoir les rouvrir.
+
+- **Enveloppe** (`docToJson`, `src/export.ts`) : `{ "app": "MyLabelZebra", "version": n, "doc": { … } }`. Le document porte aussi `formatVersion` : c’est ce qui date les documents stockés, qui n’ont pas d’enveloppe. Absent = version 1 (anciens fichiers, document nu collé).
+- **Un seul point d’entrée** : tout chargement passe par `normalizeDoc` (`src/elements.ts`), qui appelle `migrateDoc` (`src/migrate.ts`) puis complète les champs manquants avec `newDoc()`. `jsonToDoc` lit d’abord l’enveloppe avec `migrateFile` ; `jsonToDocWithWarnings` renvoie en plus les avertissements (`migrationWarningText` pour les afficher).
+- **`FORMAT_VERSION`** (`src/migrate.ts`) n’augmente qu’en cas de **rupture** : champ renommé, supprimé, déplacé ou dont le sens ou l’unité change. Ajouter un champ **facultatif** n’est pas une rupture : `normalizeDoc` lui donne sa valeur par défaut (ou le code tolère `undefined`).
+- **Fichier plus récent** (`version > FORMAT_VERSION`) : il s’ouvre au mieux avec un avertissement. Les champs inconnus sont conservés tels quels ; les éléments d’un type inconnu sont retirés de `elements` (ils ne sont ni dessinés ni modifiables) et rangés dans `unknownElements` avec leur position, puis remis à leur place par `docToJson`. La version du fichier est conservée à l’export.
+
+### La règle
+
+Toute modification du format de `LabelDoc` (ou d’un élément) qui n’est pas un simple ajout facultatif :
+
+1. **ajoute une migration** `{ from: n, description, migrate }` à `MIGRATIONS` et passe `FORMAT_VERSION` à `n + 1`. Une migration reçoit un objet brut (rien n’est garanti), ne s’exécute que sur un document de version ≤ `from` et n’a donc pas à être idempotente ;
+2. **ajoute une fixture** dans `src/__fixtures__/` : un fichier `.mlz.json` à l’ancien format, construit à partir des types réels, avec des valeurs fictives (jamais de données client), et un test dans `src/migrate.test.ts` qui vérifie le chargement, les valeurs migrées et l’aller-retour `jsonToDoc(docToJson(doc))` ;
+3. **ne modifie jamais une fixture existante** : elle représente des fichiers déjà chez les utilisateurs ;
+4. **ne supprime ni ne renomme jamais un champ sans migration**, même s’il semble inutilisé : marquez-le `@deprecated` dans `types.ts` et laissez la migration le convertir ;
+5. un nouveau **type d’élément** s’inscrit dans `KNOWN_TYPES` (`src/migrate.ts`) — c’est une erreur de compilation sinon — faute de quoi il serait mis de côté à l’ouverture.
+
+`LEGACY_FIXES` regroupe les corrections antérieures au numéro de version (`autoShrink` → `fit`) : des fichiers « version 1 » existent dans les deux formes, elles s’appliquent donc à tout document et doivent rester idempotentes. N’y ajoutez rien : utilisez `MIGRATIONS`.
 
 ## Tests
 

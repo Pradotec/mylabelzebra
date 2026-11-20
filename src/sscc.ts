@@ -380,16 +380,20 @@ const csvCell = (s: string) => (/[;"\n\r]/.test(s) ? '"' + s.replace(/"/g, '""')
  * Journal au format CSV (séparateur « ; », une ligne par SSCC, les plus anciens d'abord).
  * Le SSCC est écrit avec son identifiant « (00) » : le tableur le garde comme texte
  * (un nombre de 18 chiffres perdrait ses derniers chiffres dans Excel).
+ * Dernière colonne (ajoutée en fin de ligne pour rester compatible avec les CSV existants) :
+ * « oui » pour un SSCC réservé par un travail interrompu mais pas encore imprimé
+ * (`notPrinted` = nombre des derniers SSCC de la plage non envoyés).
  */
-export function ssccLogCsv(entries: SsccLogEntry[]): string {
-  const head = [t('Date'), t('Document'), t('Travail'), 'SSCC', t('Ligne / étiquette'), t('Plage')];
+export function ssccLogCsv(entries: (SsccLogEntry & { notPrinted?: number })[]): string {
+  const head = [t('Date'), t('Document'), t('Travail'), 'SSCC', t('Ligne / étiquette'), t('Plage'), t('Réservé non imprimé')];
   const lines = [head.join(';')];
   for (const e of entries.slice().sort((a, b) => a.at - b.at)) {
     const range = `${e.first}-${e.last}`;
+    const firstNotPrinted = e.count - Math.max(0, Math.min(e.count, e.notPrinted ?? 0));
     for (let k = 0; k < e.count; k++) {
       const idx = e.indices[k];
       lines.push(
-        [stamp(e.at), e.docName, e.kind, '(00)' + composeSscc(e.extension, e.prefix, e.start + k), idx == null ? '' : String(idx + 1), range].map(csvCell).join(';'),
+        [stamp(e.at), e.docName, e.kind, '(00)' + composeSscc(e.extension, e.prefix, e.start + k), idx == null ? '' : String(idx + 1), range, k >= firstNotPrinted ? t('oui') : ''].map(csvCell).join(';'),
       );
     }
   }

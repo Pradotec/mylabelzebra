@@ -13,6 +13,8 @@ vi.mock('./zebra', async (orig) => {
     savedSettings: () => ({}),
     settingsZpl: () => '',
     write: vi.fn(async () => undefined),
+    // imprimante simulée prête (~HS)
+    checkReady: vi.fn(async () => ({ state: 'ready', status: m.parseHostStatus('\x02030,0,0\x03\x02001,0,0,0\x03') })),
   };
 });
 

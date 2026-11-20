@@ -4,11 +4,12 @@ import { uid } from './util';
 import { shapeDef } from './render/shapes';
 import { SYMBOLOGIES, is2D } from './render/codes';
 import { t } from './i18n';
+import { FORMAT_VERSION, migrateDoc, type RawDoc, type VersionFields } from './migrate';
 
 export const FONTS = ['Arial', 'Helvetica', 'Arial Narrow', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Segoe UI', 'Georgia', 'Times New Roman', 'Courier New', 'Consolas', 'Impact'];
 
 export function newDoc(partial: Partial<LabelDoc> = {}): LabelDoc {
-  return {
+  const doc: LabelDoc & VersionFields = {
     id: uid(),
     name: t('Étiquette sans titre'),
     widthIn: 4,
@@ -21,17 +22,23 @@ export function newDoc(partial: Partial<LabelDoc> = {}): LabelDoc {
     guides: { x: [], y: [] },
     zplRaster: false,
     copies: 1,
+    formatVersion: FORMAT_VERSION,
     ...partial,
   };
+  return doc;
 }
 
 /**
  * Complète un document importé (anciennes versions, JSON externe) destiné à l'éditeur.
+ * Tous les chemins de chargement y passent (fichier, « Mes étiquettes », document courant,
+ * modèles distants) : les migrations de format (src/migrate.ts) s'appliquent ici, d'après
+ * le champ formatVersion du document (absent = 1). Les champs inconnus sont conservés.
  * La plage SSCC réservée d'un travail (ssccJob) n'a de sens que sur la copie figée d'un
  * travail : elle est retirée, sauf demande explicite (keepJob, documents de travail).
  */
-export function normalizeDoc(d: Partial<LabelDoc>, opts: { keepJob?: boolean } = {}): LabelDoc {
+export function normalizeDoc(src: Partial<LabelDoc>, opts: { keepJob?: boolean } = {}): LabelDoc {
   const base = newDoc();
+  const d = migrateDoc(src as RawDoc).doc as Partial<LabelDoc>;
   const doc = { ...base, ...d } as LabelDoc;
   if (!opts.keepJob) delete doc.ssccJob;
   if (doc.roll && !(Number(doc.roll.columns) > 1)) delete doc.roll;
@@ -47,11 +54,8 @@ export function normalizeDoc(d: Partial<LabelDoc>, opts: { keepJob?: boolean } =
     };
   }
   doc.elements = (doc.elements || []).map((e) => {
+    // (autoShrink → fit : migration héritée, voir LEGACY_FIXES dans migrate.ts)
     const n = { ...e, id: e.id || uid(), rotation: e.rotation || 0 } as LabelElement;
-    if (n.type === 'text' && !n.fit) {
-      n.fit = n.autoShrink ? 'wrapShrink' : 'wrapGrow';
-      delete n.autoShrink;
-    }
     if (n.type === 'mark') {
       n.kind = n.kind === 'estimated' ? 'estimated' : 'health';
       n.country = n.country ?? '';

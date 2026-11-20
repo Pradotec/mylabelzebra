@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { Copy, ClipboardPaste, CopyPlus, Trash2, BringToFront, SendToBack, Group, Ungroup, Lock, Unlock, BoxSelect, ImagePlus, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Stamp, Images, ClipboardCheck } from 'lucide-react';
+import { Copy, ClipboardPaste, CopyPlus, Trash2, BringToFront, SendToBack, Group, Ungroup, Lock, Unlock, BoxSelect, ImagePlus, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Stamp, Images, ClipboardCheck, Paintbrush, PaintRoller, ChevronUp, ChevronDown, Eye, EyeOff, SquareDashedMousePointer } from 'lucide-react';
 import { useStore } from '../store';
 import { useClickOutside, EstimatedSignIcon } from './ui';
 import { t } from '../i18n';
@@ -42,19 +42,28 @@ export function ContextMenu({ state, onClose }: { state: CtxMenuState; onClose: 
   const has = sel.length > 0;
   const locked = has && sel.every((e) => e.locked);
   const grouped = sel.some((e) => e.groups?.length);
+  const hidden = has && sel.every((e) => e.hidden);
+  const styleClip = st.styleClip;
+  const styleTarget = !!styleClip && sel.some((e) => e.type === styleClip.type);
   const run = (f: () => void) => () => {
     f();
     onClose();
   };
-  const left = Math.min(state.x, window.innerWidth - 250);
-  const top = Math.max(8, Math.min(state.y, window.innerHeight - (has ? 440 : 470)));
+  const left = Math.min(state.x, window.innerWidth - 290);
+  const top = Math.max(8, Math.min(state.y, window.innerHeight - (has ? 720 : 560)));
   return (
-    <div ref={ref} className="menu" style={{ position: 'fixed', left, top }} role="menu">
+    <div ref={ref} className="menu" style={{ position: 'fixed', left, top, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' }} role="menu">
       <button className="mi" disabled={!has} onClick={run(st.copySelected)}>
         <Copy size={16} /> {t('Copier')} <span className="k">Ctrl+C</span>
       </button>
       <button className="mi" onClick={run(st.paste)}>
         <ClipboardPaste size={16} /> {t('Coller')} <span className="k">Ctrl+V</span>
+      </button>
+      <button className="mi" disabled={!has} onClick={run(() => st.copyStyle() && st.toast(t('Mise en forme copiée'), 'ok'))}>
+        <Paintbrush size={16} /> {t('Copier la mise en forme')} <span className="k">Ctrl+Alt+C</span>
+      </button>
+      <button className="mi" disabled={!styleTarget} onClick={run(() => void st.pasteStyle())}>
+        <PaintRoller size={16} /> {t('Coller la mise en forme')} <span className="k">Ctrl+Alt+V</span>
       </button>
       <button
         className="mi"
@@ -72,10 +81,16 @@ export function ContextMenu({ state, onClose }: { state: CtxMenuState; onClose: 
       </button>
       <hr />
       <button className="mi" disabled={!has} onClick={run(() => st.reorder(st.selected, 'front'))}>
-        <BringToFront size={16} /> {t('Premier plan')}
+        <BringToFront size={16} /> {t('Premier plan')} <span className="k">Ctrl+Maj+]</span>
+      </button>
+      <button className="mi" disabled={!has} onClick={run(() => st.reorder(st.selected, 'up'))}>
+        <ChevronUp size={16} /> {t('Avancer d’un plan')} <span className="k">Ctrl+]</span>
+      </button>
+      <button className="mi" disabled={!has} onClick={run(() => st.reorder(st.selected, 'down'))}>
+        <ChevronDown size={16} /> {t('Reculer d’un plan')} <span className="k">Ctrl+[</span>
       </button>
       <button className="mi" disabled={!has} onClick={run(() => st.reorder(st.selected, 'back'))}>
-        <SendToBack size={16} /> {t('Arrière-plan')}
+        <SendToBack size={16} /> {t('Arrière-plan')} <span className="k">Ctrl+Maj+[</span>
       </button>
       <button className="mi" disabled={sel.length < 2} onClick={run(st.groupSelected)}>
         <Group size={16} /> {t('Grouper')} <span className="k">Ctrl+G</span>
@@ -83,11 +98,17 @@ export function ContextMenu({ state, onClose }: { state: CtxMenuState; onClose: 
       <button className="mi" disabled={!grouped} onClick={run(st.ungroupSelected)}>
         <Ungroup size={16} /> {t('Dégrouper')} <span className="k">Ctrl+Maj+G</span>
       </button>
-      <button className="mi" disabled={!has} onClick={run(() => st.updateEls(st.selected, { locked: !locked }))}>
-        {locked ? <Unlock size={16} /> : <Lock size={16} />} {locked ? t('Déverrouiller') : t('Verrouiller')}
+      <button className="mi" disabled={!has} onClick={run(st.toggleLockSelected)}>
+        {locked ? <Unlock size={16} /> : <Lock size={16} />} {locked ? t('Déverrouiller') : t('Verrouiller')} <span className="k">Ctrl+Maj+L</span>
+      </button>
+      <button className="mi" disabled={!has} onClick={run(st.toggleHiddenSelected)}>
+        {hidden ? <Eye size={16} /> : <EyeOff size={16} />} {hidden ? t('Afficher') : t('Masquer')} <span className="k">Ctrl+Maj+H</span>
       </button>
       <button className="mi" onClick={run(() => st.select(st.doc.elements.filter((e) => !e.hidden).map((e) => e.id)))}>
         <BoxSelect size={16} /> {t('Tout sélectionner')} <span className="k">Ctrl+A</span>
+      </button>
+      <button className="mi" disabled={!has} onClick={run(st.selectSameType)}>
+        <SquareDashedMousePointer size={16} /> {t('Sélectionner les éléments du même type')}
       </button>
       {!has && (
         <>

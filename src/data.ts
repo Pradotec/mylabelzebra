@@ -243,3 +243,284 @@ export async function fetchSheet(url: string): Promise<DataSet> {
   if (/^\s*<!DOCTYPE html/i.test(txt)) throw new Error('La feuille n’est pas publiée en CSV');
   return parseDelimited(txt, 'Google Sheets');
 }
+
+// ---------- Outils sur les lignes (tri, filtre, recherche, éclatement, génération) ----------
+
+/** Comparaison sans accents ni casse */
+export const foldText = (s: string) =>
+  s
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .trim();
+
+/** GTIN-8 / 12 / 13 / 14 avec clé de contrôle correcte (espaces ignorés) */
+export function isValidGtinText(v: string): boolean {
+  const s = v.replace(/\s/g, '');
+  if (!/^(\d{8}|\d{12,14})$/.test(s)) return false;
+  let sum = 0;
+  for (let i = 1; i < s.length; i++) sum += +s[s.length - 1 - i] * (i % 2 === 1 ? 3 : 1);
+  return (10 - (sum % 10)) % 10 === +s[s.length - 1];
+}
+
+export type RowOp = 'contains' | 'eq' | 'ne' | 'empty' | 'notEmpty' | 'dup' | 'badGtin';
+export interface RowFilter {
+  /** recherche dans toutes les colonnes */
+  query: string;
+  /** colonne du critère ('' = aucun critère) */
+  column: string;
+  op: RowOp;
+  value: string;
+}
+
+/**
+ * Indices des lignes qui passent la recherche et le critère de colonne. Comparaisons sans
+ * casse ni accents. « dup » : valeur non vide présente sur plusieurs lignes de la colonne ;
+ * « badGtin » : valeur non vide qui n'est pas un GTIN-8/12/13/14 à clé correcte.
+ */
+export function filterRows(data: Pick<DataSet, 'rows' | 'columns'>, f: RowFilter): number[] {
+  const q = foldText(f.query);
+  const v = foldText(f.value);
+  let counts: Map<string, number> | undefined;
+  if (f.column && f.op === 'dup') {
+    counts = new Map();
+    for (const r of data.rows) {
+      const x = foldText(r[f.column] ?? '');
+      if (x) counts.set(x, (counts.get(x) ?? 0) + 1);
+    }
+  }
+  const out: number[] = [];
+  data.rows.forEach((r, i) => {
+    if (q && !data.columns.some((c) => foldText(r[c] ?? '').includes(q))) return;
+    if (f.column) {
+      const x = foldText(r[f.column] ?? '');
+      switch (f.op) {
+        case 'contains':
+          if (v && !x.includes(v)) return;
+          break;
+        case 'eq':
+          if (x !== v) return;
+          break;
+        case 'ne':
+          if (x === v) return;
+          break;
+        case 'empty':
+          if (x !== '') return;
+          break;
+        case 'notEmpty':
+          if (x === '') return;
+          break;
+        case 'dup':
+          if (!x || (counts?.get(x) ?? 0) < 2) return;
+          break;
+        case 'badGtin':
+          if (!x || isValidGtinText(x)) return;
+          break;
+      }
+    }
+    out.push(i);
+  });
+  return out;
+}
+
+const collator = new Intl.Collator('fr', { numeric: true, sensitivity: 'base' });
+
+/**
+ * Trie les lignes selon une colonne, en ordre naturel (« ZB1-01-02 » avant « ZB1-01-10 »),
+ * sans tenir compte de la casse ni des accents. Les valeurs vides restent à la fin dans les
+ * deux sens ; tri stable. Cases cochées et copies suivent leur ligne.
+ */
+export function sortRows(data: DataSet, column: string, dir: 'asc' | 'desc' = 'asc'): DataSet {
+  const k = dir === 'desc' ? -1 : 1;
+  const order = data.rows.map((_, i) => i);
+  const val = data.rows.map((r) => (r[column] ?? '').trim());
+  order.sort((a, b) => {
+    const x = val[a],
+      y = val[b];
+    if (!x || !y) return x === y ? a - b : x ? -1 : 1;
+    return k * collator.compare(x, y) || a - b;
+  });
+  return {
+    ...data,
+    rows: order.map((i) => data.rows[i]),
+    checked: order.map((i) => !!data.checked[i]),
+    copies: order.map((i) => data.copies[i] ?? 1),
+  };
+}
+
+/**
+ * Ligne cherchée par « Aller à… » : numéro de ligne (1 = première) s'il est dans les
+ * bornes, sinon la prochaine ligne (après « from », en boucle) dont une colonne contient
+ * le texte (sans casse ni accents). Renvoie aussi le rang de l'occurrence et leur nombre.
+ */
+export function findRow(data: Pick<DataSet, 'rows' | 'columns'>, query: string, from = -1): { row: number; rank: number; count: number } | null {
+  const q = query.trim();
+  if (!q) return null;
+  if (/^\d+$/.test(q)) {
+    const n = parseInt(q, 10);
+    if (n >= 1 && n <= data.rows.length) return { row: n - 1, rank: 1, count: 1 };
+  }
+  const f = foldText(q);
+  const hits: number[] = [];
+  data.rows.forEach((r, i) => {
+    if (data.columns.some((c) => foldText(r[c] ?? '').includes(f))) hits.push(i);
+  });
+  if (!hits.length) return null;
+  const k = hits.findIndex((i) => i > from);
+  const at = k < 0 ? 0 : k;
+  return { row: hits[at], rank: at + 1, count: hits.length };
+}
+
+export type SplitMode = { kind: 'sep'; sep: string } | { kind: 'cases' };
+
+/**
+ * Morceaux d'une valeur à éclater.
+ * - séparateur : découpe, espaces retirés, morceaux vides ignorés ;
+ * - cases : « ZB1-04-03-B1B5C1C3 » → ZB1-04-03-B1, -B5, -C1, -C3 (préfixe jusqu'au dernier
+ *   « - » conservé, dernier segment découpé en motifs lettre + chiffres) ; sinon inchangée.
+ */
+export function splitValue(value: string, mode: SplitMode): string[] {
+  if (mode.kind === 'sep') {
+    if (!mode.sep) return [value];
+    const parts = value
+      .split(mode.sep)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    return parts.length ? parts : [value];
+  }
+  const v = value.trim();
+  const i = v.lastIndexOf('-');
+  const prefix = v.slice(0, i + 1);
+  const last = v.slice(i + 1);
+  if (!/^([A-Z]\d+){2,}$/.test(last)) return [value];
+  return (last.match(/[A-Z]\d+/g) ?? []).map((p) => prefix + p);
+}
+
+/** Nombre de lignes après éclatement (aperçu) */
+export function splitCount(data: Pick<DataSet, 'rows'>, column: string, mode: SplitMode): number {
+  return data.rows.reduce((n, r) => n + splitValue(r[column] ?? '', mode).length, 0);
+}
+
+/**
+ * Éclate une colonne : une ligne par morceau, les autres colonnes (case cochée et copies
+ * comprises) recopiées. Le résultat est limité à « max » lignes (truncated = lignes perdues).
+ */
+export function splitColumn(data: DataSet, column: string, mode: SplitMode, max = MAX_ROWS): { data: DataSet; truncated: number } {
+  const rows: Record<string, string>[] = [];
+  const checked: boolean[] = [];
+  const copies: number[] = [];
+  let total = 0;
+  data.rows.forEach((r, i) => {
+    for (const p of splitValue(r[column] ?? '', mode)) {
+      total++;
+      if (rows.length >= max) continue;
+      rows.push({ ...r, [column]: p });
+      checked.push(!!data.checked[i]);
+      copies.push(data.copies[i] ?? 1);
+    }
+  });
+  return { data: { ...data, rows, checked, copies }, truncated: total - rows.length };
+}
+
+// ---------- Générateur d'emplacements ----------
+
+export type RangeSegment =
+  | { name: string; kind: 'text'; value: string }
+  | { name: string; kind: 'num'; from: number; to: number; pad: number }
+  | { name: string; kind: 'alpha'; from: string; to: string };
+
+/** Valeurs d'un segment (plages croissantes ou décroissantes, au plus MAX_ROWS + 1) */
+export function segmentValues(s: RangeSegment): string[] {
+  if (s.kind === 'text') return [s.value];
+  if (s.kind === 'num') {
+    const a = Math.round(Number(s.from) || 0),
+      b = Math.round(Number(s.to) || 0);
+    const pad = Math.max(0, Math.min(20, Math.round(Number(s.pad) || 0)));
+    const step = a <= b ? 1 : -1;
+    const out: string[] = [];
+    for (let v = a; step > 0 ? v <= b : v >= b; v += step) {
+      out.push((v < 0 ? '-' : '') + String(Math.abs(v)).padStart(pad, '0'));
+      if (out.length > MAX_ROWS) break;
+    }
+    return out;
+  }
+  const code = (x: string) => (x.trim() || 'A').toUpperCase().charCodeAt(0);
+  const a = code(s.from),
+    b = code(s.to);
+  if (a < 65 || a > 90 || b < 65 || b > 90) return [];
+  const step = a <= b ? 1 : -1;
+  const out: string[] = [];
+  for (let c = a; step > 0 ? c <= b : c >= b; c += step) out.push(String.fromCharCode(c));
+  return out;
+}
+
+/** Nombre de combinaisons (produit cartésien) */
+export function rangeCount(segments: RangeSegment[]): number {
+  return segments.length ? segments.reduce((n, s) => n * segmentValues(s).length, 1) : 0;
+}
+
+/**
+ * Produit cartésien des segments (le dernier varie le plus vite). Colonnes : une par
+ * segment, plus « output » (défaut Emplacement) mis en forme par le modèle
+ * (« {Zone}-{Allée}-{Travée}-{Niveau}{Position} » ; modèle vide = segments accolés ;
+ * {Nom} inconnu laissé tel quel). Au plus « max » lignes (total = nombre de combinaisons).
+ */
+export function generateRanges(segments: RangeSegment[], format: string, output = 'Emplacement', max = MAX_ROWS): { columns: string[]; rows: Record<string, string>[]; total: number } {
+  const names = segments.map((s, i) => s.name.trim() || `Segment ${i + 1}`);
+  const seen = new Set<string>();
+  const cols = names.map((n) => {
+    let c = n;
+    for (let k = 2; seen.has(c); k++) c = `${n}_${k}`;
+    seen.add(c);
+    return c;
+  });
+  const outBase = output.trim() || 'Emplacement';
+  let out = outBase;
+  for (let k = 2; seen.has(out); k++) out = `${outBase}_${k}`;
+  const values = segments.map(segmentValues);
+  const total = rangeCount(segments);
+  const rows: Record<string, string>[] = [];
+  const fmt = format.trim();
+  if (total > 0) {
+    const idx = values.map(() => 0);
+    for (let n = 0; n < Math.min(total, max); n++) {
+      const r: Record<string, string> = {};
+      cols.forEach((c, i) => (r[c] = values[i][idx[i]]));
+      r[out] = fmt
+        ? fmt.replace(/\{([^{}]+)\}/g, (w, key: string) => {
+            const i = names.indexOf(key.trim());
+            return i < 0 ? w : values[i][idx[i]];
+          })
+        : cols.map((c) => r[c]).join('');
+      rows.push(r);
+      for (let i = idx.length - 1; i >= 0; i--) {
+        if (++idx[i] < values[i].length) break;
+        idx[i] = 0;
+      }
+    }
+  }
+  return { columns: [...cols, out], rows, total };
+}
+
+/**
+ * Ajoute des lignes à un jeu de données (colonnes réunies, valeurs manquantes vides),
+ * ou crée le jeu s'il n'existe pas. Limité à « max » lignes au total.
+ */
+export function appendRows(data: DataSet | undefined, columns: string[], rows: Record<string, string>[], source: string, max = MAX_ROWS): { data: DataSet; truncated: number } {
+  const base: DataSet = data ?? { columns: [], rows: [], checked: [], copies: [], source };
+  const cols = [...base.columns];
+  for (const c of columns) if (!cols.includes(c)) cols.push(c);
+  const room = Math.max(0, max - base.rows.length);
+  const full = (r: Record<string, string>) => (cols.every((c) => c in r) ? r : Object.fromEntries(cols.map((c) => [c, r[c] ?? ''])));
+  const added = rows.slice(0, room).map(full);
+  return {
+    data: {
+      ...base,
+      columns: cols,
+      rows: [...base.rows.map(full), ...added],
+      checked: [...base.checked, ...added.map(() => false)],
+      copies: [...base.copies, ...added.map(() => 1)],
+    },
+    truncated: rows.length - added.length,
+  };
+}

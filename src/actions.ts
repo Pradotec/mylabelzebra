@@ -3,12 +3,16 @@ import type { LabelDoc, LabelElement, SavedLabel, Symbology, TextEl, MarkKind, M
 import { BASE_DPI } from './types';
 import { makeBarcode, makeImage, makeQr, makeShape, makeTable, makeText, makeMark, newDoc } from './elements';
 import { fileToDataUrl, loadImage } from './render/images';
-import { kvGet, kvSet, storageErrorMessage } from './storage';
-import { thumbnail, jsonToDoc } from './export';
+import { kvGet, kvSet, storageErrorMessage, prefGet, prefSet } from './storage';
+import { thumbnail, jsonToDocWithWarnings } from './export';
+import { migrationWarningText } from './migrate';
 import { uid, deepClone } from './util';
 import { t } from './i18n';
-import { docUsesSerial, serialNextStart, serialDigits } from './render/resolve';
-import { elementBounds, elementHeight, hasFixedHeight } from './render/draw';
+import { docUsesSerial, docUsesSscc, serialNextStart, serialDigits, type PrintJob } from './render/resolve';
+import { elementBounds, elementHeight, hasFixedHeight, rollColumns } from './render/draw';
+import { generateJobsZpl } from './zpl/generate';
+import { CancelledError, isCancelled } from './progress';
+import type { QueueCtl } from './printQueue';
 import * as zebra from './zebra';
 
 const S = () => useStore.getState();
@@ -170,10 +174,11 @@ export function newLabel() {
 
 export async function importJsonText(text: string) {
   try {
-    const doc = jsonToDoc(text);
+    const { doc, warnings } = jsonToDocWithWarnings(text);
     doc.id = uid();
     S().loadDoc(doc, true);
     S().toast(t('Étiquette importée'), 'ok');
+    for (const w of warnings) S().toast(migrationWarningText(w), 'error');
   } catch (e) {
     S().toast((e as Error).message || t('Fichier d’étiquette invalide'), 'error');
   }
@@ -274,38 +279,272 @@ export function setLabelSize(w: number, h: number, round = false) {
 }
 
 // ---------- Zebra ----------
+const isBrowserPrintDown = (e: unknown) => e instanceof zebra.BrowserPrintMissing || (e as Error)?.name === 'TypeError' || (e as Error)?.name === 'AbortError';
+
+/** Imprimante à utiliser ; null (avec message et fenêtre Zebra ouverte) si aucune */
+async function zebraDevice(): Promise<zebra.ZebraDevice | null> {
+  const s = S();
+  try {
+    const dev = zebra.lastPrinter() ?? (await zebra.getDefaultPrinter());
+    if (dev) return dev;
+    s.toast(t('Aucune imprimante Zebra sélectionnée.'), 'error');
+  } catch (e) {
+    if (!isBrowserPrintDown(e)) throw e;
+    s.toast(t('Zebra Browser Print est introuvable. Installez-le puis réessayez.'), 'error');
+  }
+  s.set('modal', 'zebra');
+  return null;
+}
+
+/** Message (traduit) d'une imprimante pas prête ou d'un état illisible */
+export function readinessMessage(r: zebra.Readiness): string {
+  if (r.state === 'notReady') return t('Imprimante pas prête : {p}', { p: r.problems.map((p) => t(p)).join(', ') });
+  if (r.state === 'unknown') return t('État de l’imprimante illisible : Browser Print n’a pas renvoyé de réponse à ~HS.');
+  return '';
+}
+
+/** Avance le départ de la numérotation de l'éditeur après l'envoi de `n` étiquettes numérotées */
+function advanceNumbering(doc: LabelDoc, n: number) {
+  const s = S();
+  // seulement si l'éditeur montre toujours le document du travail
+  if (s.doc.id !== doc.id || n <= 0) return;
+  const cur = s.doc;
+  if (!docUsesSerial(cur) || (cur.data && cur.data.rows.length)) return;
+  // même calcul que l'aperçu : pas, répétition (même numéro sur N étiquettes), base 36
+  const next = serialNextStart(cur.numbering, n);
+  s.setDoc((d) => {
+    d.numbering = { ...d.numbering, start: next };
+  });
+  s.toast(t('Numérotation : prochain départ à {n}', { n: (next < 0 ? '-' : '') + serialDigits(next, cur.numbering.alpha) }));
+}
+
+/**
+ * Envoi d'un programme ZPL déjà prêt (visionneuse ZPL) : vérification de l'état avant
+ * l'envoi, mais pas de découpage (le code est envoyé tel quel).
+ */
 export async function sendToZebra(zpl: string, advanceSerial = true): Promise<boolean> {
   const s = S();
-  let dev = zebra.lastPrinter();
   try {
-    if (!dev) dev = await zebra.getDefaultPrinter();
-    if (!dev) {
-      s.toast(t('Aucune imprimante Zebra sélectionnée.'), 'error');
-      s.set('modal', 'zebra');
+    const dev = await zebraDevice();
+    if (!dev) return false;
+    const r = await zebra.checkReady(dev);
+    if (r.state === 'notReady') {
+      s.toast(readinessMessage(r), 'error');
       return false;
     }
+    if (r.state === 'unknown' && !window.confirm(readinessMessage(r) + '\n\n' + t('Envoyer quand même ?'))) return false;
     const saved = zebra.savedSettings(dev);
     const pre = zebra.settingsZpl({ darkness: saved.darkness, speed: saved.speed });
-    await zebra.write(dev, pre + zpl);
+    await zebra.write(dev, pre + zpl, Math.max(20000, Math.ceil(zpl.length / 20000) * 1000));
     s.toast(t('Envoyé à {p}', { p: dev.name }), 'ok');
-    const doc = s.doc;
-    if (advanceSerial && docUsesSerial(doc) && !(doc.data && doc.data.rows.length)) {
-      const n = Math.min(500, Math.max(1, doc.numbering.count));
-      // même calcul que l'aperçu : pas, répétition (même numéro sur N étiquettes), base 36
-      const next = serialNextStart(doc.numbering, n);
-      s.setDoc((d) => {
-        d.numbering = { ...d.numbering, start: next };
-      });
-      s.toast(t('Numérotation : prochain départ à {n}', { n: (next < 0 ? '-' : '') + serialDigits(next, doc.numbering.alpha) }));
-    }
+    if (advanceSerial) advanceNumbering(s.doc, Math.min(500, Math.max(1, s.doc.numbering.count)));
     return true;
   } catch (e) {
-    if (e instanceof zebra.BrowserPrintMissing || (e as Error).name === 'TypeError' || (e as Error).name === 'AbortError') {
+    if (isBrowserPrintDown(e)) {
       s.toast(t('Zebra Browser Print est introuvable. Installez-le puis réessayez.'), 'error');
       s.set('modal', 'zebra');
     } else s.toast(t('Erreur d’impression : {m}', { m: (e as Error).message }), 'error');
     return false;
   }
+}
+
+/** Taille des paquets envoyés à l'imprimante (étiquettes), réglable et mémorisée */
+export const DEFAULT_CHUNK = 50;
+const CHUNK_KEY = 'zebra.chunk';
+export const getChunkSize = () => {
+  const v = Math.round(Number(prefGet<number>(CHUNK_KEY, DEFAULT_CHUNK)));
+  return Number.isFinite(v) && v >= 1 ? Math.min(1000, v) : DEFAULT_CHUNK;
+};
+export const setChunkSize = (n: number) => prefSet(CHUNK_KEY, Math.max(1, Math.min(1000, Math.round(n) || DEFAULT_CHUNK)));
+
+export const labelCount = (jobs: PrintJob[]) => jobs.reduce((a, j) => a + j.copies, 0);
+
+/**
+ * Découpe un travail en paquets d'au plus `size` étiquettes, dans l'ordre. Une ligne dont
+ * les copies dépassent la place restante est coupée (copies réparties sur deux paquets),
+ * sauf si `splitCopies` est faux (SSCC : les copies d'une étiquette restent ensemble).
+ */
+export function splitChunks(jobs: PrintJob[], size: number, splitCopies = true): PrintJob[][] {
+  const max = Math.max(1, Math.floor(size));
+  const out: PrintJob[][] = [];
+  let cur: PrintJob[] = [];
+  let n = 0;
+  const flush = () => {
+    if (cur.length) out.push(cur);
+    cur = [];
+    n = 0;
+  };
+  for (const j of jobs) {
+    let left = Math.max(1, j.copies);
+    while (left > 0) {
+      const room = max - n;
+      if (!splitCopies) {
+        if (n && left > room) flush();
+        cur.push({ index: j.index, copies: left });
+        n += left;
+        left = 0;
+        if (n >= max) flush();
+        continue;
+      }
+      const take = Math.min(left, room);
+      cur.push({ index: j.index, copies: take });
+      n += take;
+      left -= take;
+      if (n >= max) flush();
+    }
+  }
+  flush();
+  return out;
+}
+
+/** Retire les `skip` premières étiquettes d'un travail (copies comprises) */
+export function skipLabels(jobs: PrintJob[], skip: number): PrintJob[] {
+  let rest = Math.max(0, Math.floor(skip));
+  const out: PrintJob[] = [];
+  for (const j of jobs) {
+    if (rest >= j.copies) {
+      rest -= j.copies;
+      continue;
+    }
+    out.push({ index: j.index, copies: j.copies - rest });
+    rest = 0;
+  }
+  return out;
+}
+
+/** Regroupe les entrées consécutives d'une même étiquette (copies additionnées) */
+export function mergeJobs(jobs: PrintJob[]): PrintJob[] {
+  const out: PrintJob[] = [];
+  for (const j of jobs) {
+    const last = out[out.length - 1];
+    if (last && last.index === j.index) last.copies += j.copies;
+    else out.push({ ...j });
+  }
+  return out;
+}
+
+export interface ZebraSendResult {
+  /** étiquettes transmises à l'imprimante (paquets complets) */
+  sent: PrintJob[];
+  /** étiquettes non transmises */
+  remaining: PrintJob[];
+  /** arrêt demandé par l'utilisateur */
+  cancelled?: boolean;
+  /** cause de l'arrêt (message traduit) */
+  error?: string;
+}
+
+/** Commandes minimales pour un envoi hors file (fenêtres de confirmation du navigateur) */
+function standaloneCtl(): QueueCtl {
+  let cancelled = false;
+  return {
+    id: '',
+    update() {},
+    async checkpoint() {
+      if (cancelled) throw new CancelledError();
+    },
+    async problem(message, canForce) {
+      const go = canForce ? window.confirm(message + '\n\n' + t('Envoyer quand même ?')) : window.confirm(message + '\n\n' + t('Réessayer ?'));
+      if (!go) cancelled = true;
+      return go ? (canForce ? 'force' : 'resume') : 'cancel';
+    },
+    finish() {},
+    isCancelled: () => cancelled,
+  };
+}
+
+/**
+ * Envoie un travail à l'imprimante Zebra par paquets, avec vérification de l'état (~HS)
+ * avant chaque paquet :
+ * - imprimante pas prête : le travail se met en pause (Reprendre = nouvelle vérification,
+ *   Annuler = arrêt) ;
+ * - état illisible : « Envoyer quand même » proposé (une fois pour tout le travail) ;
+ * - erreur d'envoi d'un paquet : pause, Reprendre renvoie ce paquet.
+ * Rien n'est envoyé tant que l'imprimante n'a pas été jugée prête (ou forcée).
+ * « sent » = étiquettes TRANSMISES : ~HS ne dit pas combien ont réellement été imprimées.
+ */
+export async function sendJobsToZebra(doc: LabelDoc, jobs: PrintJob[], o: { ctl?: QueueCtl; advanceSerial?: boolean; chunkSize?: number } = {}): Promise<ZebraSendResult> {
+  const s = S();
+  const ctl = o.ctl ?? standaloneCtl();
+  const fail = (error: string): ZebraSendResult => ({ sent: [], remaining: jobs, error });
+  let dev: zebra.ZebraDevice | null;
+  try {
+    dev = await zebraDevice();
+  } catch (e) {
+    return fail(t('Erreur d’impression : {m}', { m: (e as Error).message }));
+  }
+  if (!dev) return fail(t('Aucune imprimante Zebra disponible'));
+  const cols = rollColumns(doc);
+  // rouleau à plusieurs étiquettes de front : paquets en rangées complètes autant que possible
+  let size = Math.max(1, Math.floor(o.chunkSize ?? getChunkSize()));
+  if (cols > 1) size = Math.max(cols, size - (size % cols));
+  const chunks = splitChunks(jobs, size, !docUsesSscc(doc));
+  const total = labelCount(jobs);
+  const saved = zebra.savedSettings(dev);
+  const pre = zebra.settingsZpl({ darkness: saved.darkness, speed: saved.speed });
+  const sent: PrintJob[] = [];
+  let forceUnknown = false;
+  let error: string | undefined;
+  let cancelled = false;
+  ctl.update({ total, chunks: chunks.length, chunk: 0, sent: 0 });
+
+  const ask = async (msg: string, canForce: boolean) => {
+    const d = await ctl.problem(msg, canForce);
+    if (d === 'cancel') {
+      cancelled = true;
+      error = msg;
+    }
+    return d;
+  };
+
+  outer: for (let i = 0; i < chunks.length; i++) {
+    // 1. état de l'imprimante
+    for (;;) {
+      const r = await zebra.checkReady(dev);
+      if (r.state === 'ready' || (r.state === 'unknown' && forceUnknown)) break;
+      const d = await ask(readinessMessage(r), r.state === 'unknown');
+      if (d === 'cancel') break outer;
+      if (d === 'force') {
+        forceUnknown = true;
+        break;
+      }
+    }
+    // 2. envoi du paquet
+    ctl.update({ chunk: i + 1 });
+    const zpl = (i === 0 ? pre : '') + generateJobsZpl(doc, chunks[i]);
+    try {
+      await zebra.write(dev, zpl, Math.max(20000, Math.ceil(zpl.length / 20000) * 1000));
+    } catch (e) {
+      const msg = isBrowserPrintDown(e)
+        ? t('Zebra Browser Print ne répond plus (paquet {i}/{n}).', { i: i + 1, n: chunks.length })
+        : t('Erreur d’envoi du paquet {i}/{n} : {m}', { i: i + 1, n: chunks.length, m: (e as Error).message });
+      const d = await ask(msg + ' ' + t('« Reprendre » renvoie ce paquet (il a pu être reçu en partie).'), false);
+      if (d === 'cancel') break;
+      i--; // renvoi du même paquet
+      continue;
+    }
+    sent.push(...chunks[i]);
+    ctl.update({ sent: labelCount(sent) });
+    // 3. pause / annulation demandées par l'utilisateur
+    if (i < chunks.length - 1) {
+      try {
+        await ctl.checkpoint();
+      } catch (e) {
+        if (!isCancelled(e)) throw e;
+        cancelled = true;
+        break;
+      }
+    }
+  }
+
+  const n = labelCount(sent);
+  const remaining = mergeJobs(skipLabels(jobs, n));
+  if (n) {
+    if (remaining.length) s.toast(t('Envoi interrompu : {n} étiquette(s) sur {t} envoyée(s) à {p}', { n, t: total, p: dev.name }), 'error');
+    else s.toast(t('Envoyé à {p}', { p: dev.name }), 'ok');
+    if (o.advanceSerial) advanceNumbering(doc, new Set(sent.map((j) => j.index)).size);
+  } else if (error) s.toast(error, 'error');
+  return { sent: mergeJobs(sent), remaining, cancelled: cancelled || undefined, error };
 }
 
 // ---------- Répartir / uniformiser ----------

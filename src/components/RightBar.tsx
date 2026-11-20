@@ -1,9 +1,11 @@
-import { memo, useEffect, useMemo, useState } from 'react';
-import { Database, Hash, CalendarDays, ScanLine, Upload, Link2, Trash2, Pencil, Check as CheckIcon, X, AlertTriangle, Search, Package, ListOrdered, Download } from 'lucide-react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Database, Hash, CalendarDays, ScanLine, Upload, Link2, Trash2, Pencil, Check as CheckIcon, X, AlertTriangle, Search, Package, ListOrdered, Download, ArrowUp, ArrowDown, ShieldCheck, ChevronRight, Split, Grid3x3, Plus, CornerDownLeft } from 'lucide-react';
 import { useStore, type RightPanel } from '../store';
 import { Panel, NumField, Check, Modal } from './ui';
 import { t, tc } from '../i18n';
-import { parseDelimited, parseFile, fetchSheet, canSwitchSheet, reloadSheet, type DataWarning } from '../data';
+import { parseDelimited, parseFile, fetchSheet, canSwitchSheet, reloadSheet, filterRows, sortRows, findRow, splitColumn, splitCount, splitValue, generateRanges, appendRows, MAX_ROWS, type DataWarning, type RowFilter, type RowOp, type SplitMode, type RangeSegment } from '../data';
+import { checkBatchAsync, checkRows, issueRows, elementLabel, ISSUE_KINDS, type Issue, type IssueKind } from '../check';
 import { insertToken } from '../actions';
 import { pickFile, downloadText } from '../util';
 import { serialValue, dateValue, formatDate, docUsesSerial, docUsesSscc, resolveText, serialDigits, parseSerialAlpha } from '../render/resolve';
@@ -67,41 +69,22 @@ export function loadData(ds: DataSet) {
 
 const setData = (f: (d: DataSet) => DataSet, key?: string) => useStore.getState().setDoc((d) => void (d.data = d.data ? f(d.data) : d.data), key);
 
-/** Comparaison sans accents ni casse */
-const fold = (s: string) =>
-  s
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .trim();
+// filtre des lignes : logique pure dans data.ts (réexportée pour compatibilité)
+export { filterRows, type RowOp, type RowFilter } from '../data';
 
-export type RowOp = 'contains' | 'eq' | 'empty' | 'notEmpty';
-export interface RowFilter {
-  /** recherche dans toutes les colonnes */
-  query: string;
-  /** colonne du critère ('' = aucun critère) */
-  column: string;
-  op: RowOp;
-  value: string;
-}
-
-/** Indices des lignes qui passent la recherche et le critère de colonne */
-export function filterRows(data: DataSet, f: RowFilter): number[] {
-  const q = fold(f.query);
-  const v = fold(f.value);
-  const out: number[] = [];
-  data.rows.forEach((r, i) => {
-    if (q && !data.columns.some((c) => fold(r[c] ?? '').includes(q))) return;
-    if (f.column) {
-      const x = fold(r[f.column] ?? '');
-      if (f.op === 'contains' && v && !x.includes(v)) return;
-      if (f.op === 'eq' && x !== v) return;
-      if (f.op === 'empty' && x !== '') return;
-      if (f.op === 'notEmpty' && x === '') return;
-    }
-    out.push(i);
-  });
-  return out;
+/**
+ * Remplace les données en gardant la ligne affichée sur le même enregistrement (tri,
+ * éclatement) ; passe par setDoc : l'opération est annulable (Ctrl+Z).
+ */
+function replaceData(f: (d: DataSet) => DataSet) {
+  const st = useStore.getState();
+  const before = st.doc.data;
+  if (!before) return;
+  const cur = before.rows[st.previewRow];
+  setData(f);
+  const after = useStore.getState().doc.data;
+  const k = after && cur ? after.rows.indexOf(cur) : -1;
+  useStore.setState({ previewRow: k >= 0 ? k : Math.min(st.previewRow, Math.max(0, (after?.rows.length ?? 1) - 1)) });
 }
 
 /** Hauteur fixe d'une ligne du tableau (virtualisation) */
@@ -117,6 +100,7 @@ export function DataPanel() {
   const [url, setUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<RowFilter>(NO_FILTER);
+  const [tool, setTool] = useState<null | 'split' | 'generate'>(null);
   const toast = (m: string) => useStore.getState().toast(m, 'error');
 
   const fromFile = async () => {
@@ -166,7 +150,7 @@ export function DataPanel() {
   const checked = data?.checked;
   const active = !!(filter.query.trim() || filter.column);
   const visible = useMemo(
-    () => (rows && columns ? (active ? filterRows({ rows, columns, checked: [], copies: [] }, filter) : rows.map((_, i) => i)) : []),
+    () => (rows && columns ? (active ? filterRows({ rows, columns }, filter) : rows.map((_, i) => i)) : []),
     [rows, columns, filter, active],
   );
   const nChecked = useMemo(() => (checked ? checked.filter(Boolean).length : 0), [checked]);
@@ -215,8 +199,13 @@ export function DataPanel() {
               </button>
             </div>
           </label>
+          <button className="btn sm flat block" onClick={() => setTool('generate')} style={{ marginTop: 6 }}>
+            <Grid3x3 size={14} /> {t('Générer des emplacements…')}
+          </button>
         </>
       )}
+      {tool === 'generate' && createPortal(<GenerateModal onClose={() => setTool(null)} />, document.body)}
+      {tool === 'split' && data && createPortal(<SplitModal data={data} onClose={() => setTool(null)} />, document.body)}
       {data && (
         <>
           <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -264,6 +253,7 @@ export function DataPanel() {
             {t('Afficher les valeurs (sinon les {{champs}})')}
           </Check>
           <RowFilterBar columns={data.columns} filter={filter} setFilter={setFilter} />
+          <GoToRow data={data} />
           <div className="row" style={{ justifyContent: 'space-between' }}>
             <span className="sec-t" style={{ margin: 0 }}>
               {t('Lignes à imprimer : {n}', { n: nChecked })}
@@ -295,6 +285,16 @@ export function DataPanel() {
           <div className="hint" style={{ marginTop: 8 }}>
             {nChecked ? t('Imprimer et exporter (PDF, ZPL) produiront {n} étiquette(s).', { n: nChecked }) : t('Aucune ligne cochée : seule la ligne affichée sera imprimée.')}
           </div>
+          <BatchCheck />
+          <div className="sec">
+            <div className="sec-t">{t('Outils')}</div>
+            <button className="btn sm block" onClick={() => setTool('split')} style={{ marginBottom: 6 }} title={t('Une ligne par valeur : « A / B » ou cases multiples « ZB1-04-03-B1B5 »')}>
+              <Split size={14} /> {t('Éclater la colonne…')}
+            </button>
+            <button className="btn sm block" onClick={() => setTool('generate')}>
+              <Grid3x3 size={14} /> {t('Générer des emplacements…')}
+            </button>
+          </div>
         </>
       )}
     </Panel>
@@ -303,7 +303,7 @@ export function DataPanel() {
 
 function RowFilterBar({ columns, filter, setFilter }: { columns: string[]; filter: RowFilter; setFilter: (f: RowFilter) => void }) {
   const set = (p: Partial<RowFilter>) => setFilter({ ...filter, ...p });
-  const needsValue = filter.op === 'contains' || filter.op === 'eq';
+  const needsValue = filter.op === 'contains' || filter.op === 'eq' || filter.op === 'ne';
   return (
     <div style={{ margin: '6px 0' }}>
       <div className="row" style={{ flexWrap: 'nowrap', marginBottom: 4 }}>
@@ -323,8 +323,15 @@ function RowFilterBar({ columns, filter, setFilter }: { columns: string[]; filte
           <select className="inp" aria-label={t('Condition')} value={filter.op} onChange={(e) => set({ op: e.target.value as RowOp })} style={{ minWidth: 0, flex: 1 }}>
             <option value="contains">{t('contient')}</option>
             <option value="eq">=</option>
+            <option value="ne">≠</option>
             <option value="empty">{t('est vide')}</option>
             <option value="notEmpty">{t('n’est pas vide')}</option>
+            <option value="dup" title={t('Valeur présente sur plusieurs lignes de la colonne')}>
+              {t('doublon')}
+            </option>
+            <option value="badGtin" title={t('Valeur non vide qui n’est pas un EAN/GTIN de 8, 12, 13 ou 14 chiffres avec une clé correcte')}>
+              {t('EAN/GTIN invalide')}
+            </option>
           </select>
         )}
         {filter.column && needsValue && <input className="inp" style={{ minWidth: 0, flex: 1 }} aria-label={t('Valeur')} value={filter.value} onChange={(e) => set({ value: e.target.value })} onKeyDown={(e) => e.stopPropagation()} />}
@@ -338,18 +345,445 @@ function RowFilterBar({ columns, filter, setFilter }: { columns: string[]; filte
   );
 }
 
+/** Affiche une ligne sur l'étiquette (valeurs visibles) et sélectionne éventuellement un élément */
+function showRow(row: number, elementId?: string) {
+  const st = useStore.getState();
+  useStore.setState({ previewRow: row, showData: true });
+  if (elementId && st.doc.elements.some((e) => e.id === elementId)) st.select([elementId], 'set', true);
+}
+
+/** « Aller à… » : numéro de ligne ou valeur cherchée ; Entrée = occurrence suivante */
+function GoToRow({ data }: { data: DataSet }) {
+  const [q, setQ] = useState('');
+  const [res, setRes] = useState<ReturnType<typeof findRow> | undefined>(undefined);
+  // lignes triées / éclatées : le résultat affiché n'est plus valable
+  useEffect(() => setRes(undefined), [data.rows]);
+  const go =(query: string, from: number) => {
+    const r = findRow(data, query, from);
+    setRes(query.trim() ? r : undefined);
+    if (r) showRow(r.row);
+  };
+  return (
+    <div style={{ margin: '0 0 6px' }}>
+      <div className="row" style={{ flexWrap: 'nowrap' }}>
+        <CornerDownLeft size={14} style={{ flex: 'none', color: 'var(--ink-2)' }} />
+        <input
+          className="inp grow"
+          placeholder={t('Aller à… (n° de ligne ou valeur)')}
+          aria-label={t('Aller à une ligne')}
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            go(e.target.value, -1);
+          }}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') go(q, res ? res.row : useStore.getState().previewRow);
+            if (e.key === 'Escape') (setQ(''), setRes(undefined));
+          }}
+        />
+      </div>
+      {res !== undefined && (
+        <div className="hint" style={{ margin: '2px 0 0', color: res ? undefined : 'var(--err)' }}>
+          {res ? (res.count > 1 ? t('Ligne {n} — occurrence {k} sur {c} (Entrée : suivante)', { n: res.row + 1, k: res.rank, c: res.count }) : t('Ligne {n}', { n: res.row + 1 })) : t('Aucune ligne trouvée')}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const KIND_LABEL: Record<IssueKind, () => string> = {
+  missingColumn: () => t('Colonnes introuvables'),
+  invalidCode: () => t('Codes-barres invalides'),
+  emptyField: () => t('Champs vides'),
+  duplicateCode: () => t('Codes-barres en double'),
+  textFit: () => t('Textes réduits ou tronqués'),
+};
+/** Entrées affichées par groupe (les suivantes restent accessibles par « Anomalie suivante ») */
+const GROUP_MAX = 100;
+
+/** « Vérifier le lot » : contrôle des lignes cochées, liste groupée des anomalies */
+function BatchCheck() {
+  const [issues, setIssues] = useState<Issue[] | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [cursor, setCursor] = useState(-1);
+  const [basis, setBasis] = useState<{ elements: unknown; rows: unknown; count: number } | null>(null);
+  const run = useRef(0);
+  const elements = useStore((s) => s.doc.elements);
+  const rows = useStore((s) => s.doc.data?.rows);
+  useEffect(() => () => void run.current++, []);
+
+  const start = async () => {
+    const doc = useStore.getState().doc;
+    const id = ++run.current;
+    const total = checkRows(doc).length;
+    setProgress({ done: 0, total });
+    setCursor(-1);
+    const list = await checkBatchAsync(doc, { onProgress: (done) => run.current === id && setProgress({ done, total }), isCancelled: () => run.current !== id });
+    if (!list || run.current !== id) return;
+    setIssues(list);
+    setBasis({ elements: doc.elements, rows: doc.data?.rows, count: total });
+    setProgress(null);
+  };
+  const cancel = () => {
+    run.current++;
+    setProgress(null);
+  };
+
+  const located = useMemo(() => (issues ?? []).filter((x) => x.row >= 0), [issues]);
+  const groups = useMemo(() => ISSUE_KINDS.map((k) => ({ kind: k, list: (issues ?? []).filter((x) => x.kind === k) })).filter((g) => g.list.length), [issues]);
+  const stale = !!basis && (basis.elements !== elements || basis.rows !== rows);
+
+  const open = (x: Issue) => {
+    if (x.row >= 0) showRow(x.row, x.elementId);
+    const k = located.indexOf(x);
+    if (k >= 0) setCursor(k);
+  };
+  const next = () => {
+    if (!located.length) return;
+    const k = (cursor + 1) % located.length;
+    setCursor(k);
+    showRow(located[k].row, located[k].elementId);
+  };
+  const uncheck = () => {
+    const bad = new Set(issueRows(issues ?? []));
+    setData((d) => ({ ...d, checked: d.checked.map((c, i) => (bad.has(i) ? false : c)) }));
+    useStore.getState().toast(t('{n} ligne(s) décochée(s) — Ctrl+Z pour annuler', { n: bad.size }), 'ok');
+  };
+  const els = useStore.getState().doc.elements;
+  const label = (x: Issue) => {
+    const el = x.elementId ? els.find((e) => e.id === x.elementId) : undefined;
+    return [x.row >= 0 ? t('Ligne {n}', { n: x.row + 1 }) : '', elementLabel(el), x.message].filter(Boolean).join(' · ');
+  };
+
+  return (
+    <div className="sec">
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <span className="sec-t" style={{ margin: 0 }}>
+          {t('Vérification du lot')}
+        </span>
+        {issues && !progress && (
+          <span
+            className="badge"
+            role="status"
+            style={{ background: issues.length ? 'var(--err)' : 'var(--ok)' }}
+          >
+            {issues.length ? t('{n} anomalie(s)', { n: issues.length }) : t('Aucune anomalie')}
+          </span>
+        )}
+      </div>
+      {progress ? (
+        <div className="row" style={{ margin: '6px 0' }}>
+          <progress className="grow" max={progress.total || 1} value={progress.done} aria-label={t('Vérification du lot')} />
+          <span className="hint" style={{ margin: 0 }}>
+            {progress.done}/{progress.total}
+          </span>
+          <button className="btn sm flat" onClick={cancel}>
+            {tc('Annuler', 'cancel')}
+          </button>
+        </div>
+      ) : (
+        <button className="btn sm block" onClick={start} style={{ margin: '6px 0' }} title={t('Contrôle les lignes cochées (toutes si aucune n’est cochée) : colonnes introuvables, codes invalides ou en double, champs vides, textes réduits ou tronqués')}>
+          <ShieldCheck size={14} /> {issues ? t('Relancer la vérification') : t('Vérifier le lot')}
+        </button>
+      )}
+      {issues && stale && !progress && <div className="hint">{t('L’étiquette ou les données ont changé depuis la vérification : relancez-la.')}</div>}
+      {issues && !issues.length && basis && !progress && <div className="okmsg">{t('{n} ligne(s) vérifiée(s), aucune anomalie ✓', { n: basis.count })}</div>}
+      {issues && issues.length > 0 && (
+        <>
+          <button className="btn sm block" style={{ marginBottom: 6 }} disabled={!located.length} onClick={next}>
+            <ChevronRight size={14} /> {t('Anomalie suivante')}
+            {cursor >= 0 && located.length ? ` (${cursor + 1}/${located.length})` : ''}
+          </button>
+          <button className="btn sm flat block" style={{ marginBottom: 6 }} disabled={!located.length} onClick={uncheck} title={t('Retire ces lignes de l’impression (annulable)')}>
+            {t('Décocher les lignes en anomalie')}
+          </button>
+          <div className="scrollbox" style={{ maxHeight: 220, padding: 4 }}>
+            {groups.map((g) => (
+              <details key={g.kind} open={groups.length === 1 || g.kind === 'missingColumn'}>
+                <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600, padding: '3px 2px' }}>
+                  {KIND_LABEL[g.kind]()} ({g.list.length})
+                </summary>
+                {g.list.slice(0, GROUP_MAX).map((x, i) => (
+                  <button
+                    key={i}
+                    className="btn sm flat block"
+                    style={{ justifyContent: 'flex-start', textAlign: 'left', height: 'auto', whiteSpace: 'normal', fontWeight: 400, background: located[cursor] === x ? 'var(--accent-soft)' : undefined }}
+                    disabled={x.row < 0}
+                    onClick={() => open(x)}
+                  >
+                    {label(x)}
+                  </button>
+                ))}
+                {g.list.length > GROUP_MAX && <div className="hint" style={{ margin: '2px 4px' }}>{t('… et {n} autre(s) : utilisez « Anomalie suivante ».', { n: g.list.length - GROUP_MAX })}</div>}
+              </details>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const SEPARATORS = ['/', ';', ',', '|'];
+
+/** « Éclater la colonne… » : une ligne par valeur (séparateur ou cases multiples) */
+function SplitModal({ data, onClose }: { data: DataSet; onClose: () => void }) {
+  const [column, setColumn] = useState(() => data.columns.find((c) => /emplacement/i.test(c)) ?? data.columns[0] ?? '');
+  const [kind, setKind] = useState<'sep' | 'cases'>(() => (/emplacement/i.test(column) ? 'cases' : 'sep'));
+  const [sep, setSep] = useState('/');
+  const mode: SplitMode = kind === 'cases' ? { kind: 'cases' } : { kind: 'sep', sep };
+  const after = useMemo(() => splitCount(data, column, mode), [data, column, kind, sep]); // eslint-disable-line react-hooks/exhaustive-deps
+  const example = useMemo(() => {
+    const r = data.rows.find((x) => splitValue(x[column] ?? '', mode).length > 1);
+    return r ? { from: r[column], to: splitValue(r[column], mode) } : null;
+  }, [data, column, kind, sep]); // eslint-disable-line react-hooks/exhaustive-deps
+  const apply = () => {
+    let lost = 0;
+    replaceData((d) => {
+      const r = splitColumn(d, column, mode);
+      lost = r.truncated;
+      return r.data;
+    });
+    const st = useStore.getState();
+    if (lost) st.toast(t('Colonne éclatée : {n} lignes ; {k} ligne(s) au-delà de {m} ignorée(s)', { n: MAX_ROWS, k: lost, m: MAX_ROWS }), 'error');
+    else st.toast(t('Colonne éclatée : {a} lignes → {b} — Ctrl+Z pour annuler', { a: data.rows.length, b: after }), 'ok');
+    onClose();
+  };
+  return (
+    <Modal
+      title={t('Éclater la colonne')}
+      icon={<Split size={18} />}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            {tc('Annuler', 'cancel')}
+          </button>
+          <button className="btn accent" disabled={!column || after === data.rows.length} onClick={apply}>
+            {t('Éclater')}
+          </button>
+        </>
+      }
+    >
+      <div className="hint">{t('Chaque valeur multiple devient une ligne ; les autres colonnes, la case à cocher et les copies sont recopiées.')}</div>
+      <label className="f" style={{ marginBottom: 8 }}>
+        {t('Colonne')}
+        <select className="inp" value={column} onChange={(e) => setColumn(e.target.value)}>
+          {data.columns.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="row" style={{ marginBottom: 8 }}>
+        <label className="check" style={{ margin: 0 }}>
+          <input type="radio" checked={kind === 'sep'} onChange={() => setKind('sep')} /> {t('Séparateur')}
+        </label>
+        {kind === 'sep' && (
+          <select className="inp" aria-label={t('Séparateur')} value={sep} onChange={(e) => setSep(e.target.value)} style={{ width: 70 }}>
+            {SEPARATORS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        )}
+        <label className="check" style={{ margin: 0 }} title={t('ZB1-04-03-B1B5C1C3 → ZB1-04-03-B1, -B5, -C1, -C3')}>
+          <input type="radio" checked={kind === 'cases'} onChange={() => setKind('cases')} /> {t('Cases multiples (B1B5C1…)')}
+        </label>
+      </div>
+      <div className="hint" role="status" style={{ fontSize: 13, color: 'var(--ink)' }}>
+        <b>{t('{a} lignes → {b}', { a: data.rows.length, b: after })}</b>
+        {after > MAX_ROWS && <span style={{ color: 'var(--err)' }}> — {t('limite de {m} lignes : les suivantes seront ignorées', { m: MAX_ROWS })}</span>}
+      </div>
+      {example ? (
+        <div className="hint">
+          {t('Exemple')} : <code>{example.from}</code> → {example.to.map((v, i) => <code key={i} style={{ marginRight: 6 }}>{v}</code>)}
+        </div>
+      ) : (
+        <div className="hint">{t('Aucune valeur à éclater dans cette colonne avec ce mode.')}</div>
+      )}
+    </Modal>
+  );
+}
+
+const DEFAULT_SEGMENTS: RangeSegment[] = [
+  { name: 'Zone', kind: 'text', value: 'ZB1' },
+  { name: 'Allée', kind: 'num', from: 1, to: 4, pad: 2 },
+  { name: 'Travée', kind: 'num', from: 1, to: 10, pad: 2 },
+  { name: 'Niveau', kind: 'alpha', from: 'A', to: 'E' },
+  { name: 'Position', kind: 'num', from: 1, to: 5, pad: 0 },
+];
+const DEFAULT_FORMAT = '{Zone}-{Allée}-{Travée}-{Niveau}{Position}';
+
+/** « Générer des emplacements… » : produit cartésien de segments (zone, allée, niveau…) */
+function GenerateModal({ onClose }: { onClose: () => void }) {
+  const data = useStore((s) => s.doc.data);
+  const [segs, setSegs] = useState<RangeSegment[]>(DEFAULT_SEGMENTS);
+  const [format, setFormat] = useState(DEFAULT_FORMAT);
+  const [output, setOutput] = useState('Emplacement');
+  const [append, setAppend] = useState(false);
+  const gen = useMemo(() => generateRanges(segs, format, output, MAX_ROWS), [segs, format, output]);
+  const room = append && data ? Math.max(0, MAX_ROWS - data.rows.length) : MAX_ROWS;
+  const setSeg = (i: number, s: RangeSegment) => setSegs(segs.map((x, k) => (k === i ? s : x)));
+  const changeKind = (i: number, kind: RangeSegment['kind']) => {
+    const name = segs[i].name;
+    setSeg(i, kind === 'text' ? { name, kind, value: '' } : kind === 'num' ? { name, kind, from: 1, to: 10, pad: 2 } : { name, kind, from: 'A', to: 'E' });
+  };
+  const apply = () => {
+    const source = t('Générateur d’emplacements');
+    let kept = 0;
+    let lost = 0;
+    useStore.getState().setDoc((d) => {
+      const r = appendRows(append ? d.data : undefined, gen.columns, gen.rows, source);
+      kept = r.data.rows.length;
+      lost = r.truncated + (gen.total - gen.rows.length);
+      d.data = r.data;
+    });
+    useStore.setState({ showData: true, ...(append ? {} : { previewRow: 0 }) });
+    const st = useStore.getState();
+    if (lost) st.toast(t('{n} lignes au total ; {k} combinaison(s) au-delà de {m} ignorée(s)', { n: kept, k: lost, m: MAX_ROWS }), 'error');
+    else st.toast(t('{n} emplacement(s) générés — cochez les lignes à imprimer', { n: gen.rows.length }), 'ok');
+    onClose();
+  };
+  const preview = gen.rows.slice(0, 3).map((r) => r[gen.columns[gen.columns.length - 1]]);
+  return (
+    <Modal
+      title={t('Générer des emplacements')}
+      icon={<Grid3x3 size={18} />}
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            {tc('Annuler', 'cancel')}
+          </button>
+          <button className="btn accent" disabled={!gen.rows.length || (append && room === 0)} onClick={apply}>
+            {append ? t('Ajouter aux données') : t('Remplacer les données')}
+          </button>
+        </>
+      }
+    >
+      <div className="hint">{t('Chaque segment est un texte fixe, une plage de nombres ou une plage de lettres ; toutes les combinaisons sont générées (le dernier segment varie le plus vite).')}</div>
+      <table className="data-table" style={{ marginBottom: 8 }}>
+        <thead>
+          <tr>
+            <th>{t('Nom')}</th>
+            <th>{t('Type')}</th>
+            <th>{t('Valeurs')}</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {segs.map((s, i) => (
+            <tr key={i}>
+              <td>
+                <input className="inp" style={{ minWidth: 80 }} aria-label={t('Nom du segment')} value={s.name} onChange={(e) => setSeg(i, { ...s, name: e.target.value })} onKeyDown={(e) => e.stopPropagation()} />
+              </td>
+              <td>
+                <select className="inp" aria-label={t('Type de segment')} value={s.kind} onChange={(e) => changeKind(i, e.target.value as RangeSegment['kind'])}>
+                  <option value="text">{t('Texte fixe')}</option>
+                  <option value="num">{t('Nombres')}</option>
+                  <option value="alpha">{t('Lettres')}</option>
+                </select>
+              </td>
+              <td>
+                {s.kind === 'text' && <input className="inp" aria-label={t('Texte')} value={s.value} onChange={(e) => setSeg(i, { ...s, value: e.target.value })} onKeyDown={(e) => e.stopPropagation()} />}
+                {s.kind === 'num' && (
+                  <div className="grid3" style={{ minWidth: 200 }}>
+                    <NumField label={t('De')} decimals={0} value={s.from} onChange={(v) => setSeg(i, { ...s, from: Math.round(v) })} />
+                    <NumField label={t('À')} decimals={0} value={s.to} onChange={(v) => setSeg(i, { ...s, to: Math.round(v) })} />
+                    <NumField label={t('Chiffres')} decimals={0} min={0} max={10} value={s.pad} onChange={(v) => setSeg(i, { ...s, pad: Math.round(v) })} />
+                  </div>
+                )}
+                {s.kind === 'alpha' && (
+                  <div className="row" style={{ flexWrap: 'nowrap' }}>
+                    <input className="inp" style={{ width: 48 }} maxLength={1} aria-label={t('De')} value={s.from} onChange={(e) => setSeg(i, { ...s, from: e.target.value.toUpperCase() })} onKeyDown={(e) => e.stopPropagation()} />
+                    –
+                    <input className="inp" style={{ width: 48 }} maxLength={1} aria-label={t('À')} value={s.to} onChange={(e) => setSeg(i, { ...s, to: e.target.value.toUpperCase() })} onKeyDown={(e) => e.stopPropagation()} />
+                  </div>
+                )}
+              </td>
+              <td>
+                <button className="icon-btn flat sm" aria-label={t('Retirer le segment')} disabled={segs.length <= 1} onClick={() => setSegs(segs.filter((_, k) => k !== i))}>
+                  <Trash2 size={14} />
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <button className="btn sm flat" style={{ marginBottom: 8 }} onClick={() => setSegs([...segs, { name: t('Segment {n}', { n: segs.length + 1 }), kind: 'num', from: 1, to: 9, pad: 0 }])}>
+        <Plus size={14} /> {t('Ajouter un segment')}
+      </button>
+      <div className="grid2">
+        <label className="f">
+          {t('Modèle (noms de segments entre accolades)')}
+          <input className="inp code" value={format} placeholder={DEFAULT_FORMAT} onChange={(e) => setFormat(e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
+        </label>
+        <label className="f">
+          {t('Colonne du résultat')}
+          <input className="inp" value={output} onChange={(e) => setOutput(e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
+        </label>
+      </div>
+      {data && (
+        <div className="row" style={{ margin: '8px 0' }}>
+          <label className="check" style={{ margin: 0 }}>
+            <input type="radio" checked={!append} onChange={() => setAppend(false)} /> {t('Remplacer les données')}
+          </label>
+          <label className="check" style={{ margin: 0 }}>
+            <input type="radio" checked={append} onChange={() => setAppend(true)} /> {t('Ajouter aux {n} lignes existantes', { n: data.rows.length })}
+          </label>
+        </div>
+      )}
+      <div className="hint" role="status" style={{ fontSize: 13, color: 'var(--ink)' }}>
+        <b>{t('{n} combinaison(s)', { n: gen.total })}</b>
+        {preview.length > 0 && (
+          <>
+            {' '}
+            — {preview.map((v, i) => <code key={i} style={{ marginRight: 6 }}>{v}</code>)}
+            {gen.total > 3 ? '…' : ''}
+          </>
+        )}
+        {gen.total > room && <div style={{ color: 'var(--err)' }}>{t('Limite de {m} lignes : seules les {k} premières combinaisons seront gardées.', { m: MAX_ROWS, k: room })}</div>}
+      </div>
+    </Modal>
+  );
+}
+
 /** Tableau virtualisé : seules les lignes visibles (± marge) sont rendues */
 function DataTable({ data, visible }: { data: DataSet; visible: number[] }) {
   const previewRow = useStore((s) => s.previewRow);
   const [top, setTop] = useState(0);
   const [editRow, setEditRow] = useState<number | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
+  /** dernier tri appliqué depuis cet en-tête (un 2e clic inverse le sens) */
+  const [sorted, setSorted] = useState<{ col: string; dir: 'asc' | 'desc' } | null>(null);
+  const box = useRef<HTMLDivElement>(null);
   const first = Math.max(0, Math.floor(top / ROW_H) - OVERSCAN);
   const last = Math.min(visible.length, Math.ceil((top + VIEW_H) / ROW_H) + OVERSCAN);
   const slice = visible.slice(first, last);
   const cols = data.columns.length + 4;
+
+  // ligne affichée hors de la vue (Aller à…, anomalie, curseur de l'éditeur) : on la fait défiler
+  useEffect(() => {
+    const el = box.current;
+    const k = visible.indexOf(previewRow);
+    if (!el || k < 0) return;
+    const y = ROW_H * (k + 1); // + en-tête
+    if (y < el.scrollTop + ROW_H || y + ROW_H > el.scrollTop + el.clientHeight) el.scrollTop = Math.max(0, y - el.clientHeight / 2);
+  }, [previewRow, visible]);
+
+  const sortBy = (col: string) => {
+    const dir = sorted?.col === col && sorted.dir === 'asc' ? 'desc' : 'asc';
+    replaceData((d) => sortRows(d, col, dir));
+    setSorted({ col, dir });
+    useStore.getState().toast(dir === 'asc' ? t('Lignes triées par « {c} » (croissant) — Ctrl+Z pour annuler', { c: col }) : t('Lignes triées par « {c} » (décroissant) — Ctrl+Z pour annuler', { c: col }), 'ok');
+  };
   return (
-    <div className="scrollbox" style={{ maxHeight: VIEW_H }} onScroll={(e) => setTop(e.currentTarget.scrollTop)}>
+    <div ref={box} className="scrollbox" style={{ maxHeight: VIEW_H }} onScroll={(e) => setTop(e.currentTarget.scrollTop)}>
       <table className="data-table">
         <thead>
           <tr>
@@ -357,7 +791,17 @@ function DataTable({ data, visible }: { data: DataSet; visible: number[] }) {
             <th>#</th>
             <th title={t('Copies')}>×</th>
             {data.columns.map((c) => (
-              <th key={c}>{c}</th>
+              <th key={c} aria-sort={sorted?.col === c ? (sorted.dir === 'asc' ? 'ascending' : 'descending') : undefined}>
+                <button
+                  className="btn sm flat"
+                  style={{ padding: '0 2px', height: 'auto', font: 'inherit', fontWeight: 600, whiteSpace: 'nowrap' }}
+                  title={sorted?.col === c && sorted.dir === 'asc' ? t('Trier par « {c} » (décroissant)', { c }) : t('Trier par « {c} » (croissant, ordre naturel)', { c })}
+                  onClick={() => sortBy(c)}
+                >
+                  {c}
+                  {sorted?.col === c && (sorted.dir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+                </button>
+              </th>
             ))}
             <th></th>
           </tr>
@@ -652,7 +1096,8 @@ const fmtStamp = (at: number) => new Date(at).toLocaleString();
 const rowsText = (ix: number[]) => (ix.length > 6 ? ix.slice(0, 6).map((i) => i + 1).join(', ') + '…' : ix.map((i) => i + 1).join(', '));
 
 function SsccLogModal({ onClose }: { onClose: () => void }) {
-  const [list, setList] = useState<SsccLogEntry[] | null>(null);
+  // notPrinted : SSCC réservés par un travail interrompu mais pas (encore) imprimés (champ optionnel)
+  const [list, setList] = useState<(SsccLogEntry & { notPrinted?: number })[] | null>(null);
   useEffect(() => {
     let live = true;
     listSsccLog()
@@ -708,7 +1153,14 @@ function SsccLogModal({ onClose }: { onClose: () => void }) {
                       {e.first}
                       {e.count > 1 ? ' → ' + e.last : ''}
                     </td>
-                    <td>{e.count}</td>
+                    <td>
+                      {e.count}
+                      {!!e.notPrinted && (
+                        <div style={{ color: 'var(--err)', fontSize: 12, whiteSpace: 'nowrap' }} title={t('Travail interrompu : les derniers SSCC de la plage restent attribués au travail et seront imprimés par sa reprise.')}>
+                          {t('dont {n} réservés non imprimés', { n: e.notPrinted })}
+                        </div>
+                      )}
+                    </td>
                     <td title={e.indices.map((i) => i + 1).join(', ')}>{rowsText(e.indices)}</td>
                   </tr>
                 ))}

@@ -12,6 +12,7 @@ import { useStore } from '../store';
 import { t } from '../i18n';
 import * as zebra from '../zebra';
 import { downloadBlob } from '../util';
+import { readinessMessage } from '../actions';
 import { CARRIER_FORMATS, DEFAULT_SETTINGS, convertItem, expandFiles, formatDots, itemBytes, makeItem, renderZplPages, zplThumb, type CarrierItem, type CarrierSettings } from '../carrier/load';
 import { concatBytes } from '../carrier/zplText';
 import type { Rotation } from '../carrier/raster';
@@ -106,8 +107,20 @@ async function printSelection() {
   if (!list.length) return;
   // chaque entrée telle qu'importée / produite, séparée par un saut de ligne si besoin
   const text = list.map((i) => (/[\r\n]$/.test(i.zpl) ? i.zpl : i.zpl + '\n')).join('');
-  useCarrier.setState({ busy: t('Envoi à l’imprimante…') });
+  useCarrier.setState({ busy: t('Vérification de l’imprimante…') });
   try {
+    // état de l'imprimante (~HS) avant l'envoi : rien n'est envoyé si elle n'est pas prête
+    const r = await zebra.checkReady(await zebra.resolvePrinter());
+    if (r.state === 'notReady') {
+      toast(readinessMessage(r) + ' — ' + t('Rien n’a été envoyé.'), 'error');
+      return;
+    }
+    if (r.state === 'unknown') {
+      // lecture impossible parce que Browser Print ne répond pas : repli sur le téléchargement
+      if (r.error && !(await zebra.isAvailable())) throw new zebra.BrowserPrintMissing();
+      if (!window.confirm(readinessMessage(r) + '\n\n' + t('Envoyer quand même ?'))) return;
+    }
+    useCarrier.setState({ busy: t('Envoi à l’imprimante…') });
     const dev = await zebra.sendRaw(text);
     toast(t('Envoyé à {p}', { p: dev.name }), 'ok');
   } catch (e) {

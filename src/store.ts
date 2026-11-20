@@ -79,6 +79,59 @@ interface State {
   promptAsk: PromptAsk | null;
   /** demande d'impression venue d'un autre outil (lien / postMessage), en attente de confirmation */
   remoteRequest: RemoteRequest | null;
+  /** mise en forme copiée (Ctrl+Alt+C), non persistée */
+  styleClip: StyleClip | null;
+}
+
+/** Mise en forme d'un élément, sans contenu, position ni taille */
+export interface StyleClip {
+  type: LabelElement['type'];
+  style: Partial<LabelElement>;
+}
+
+/** Propriétés de mise en forme copiées par type d'élément (ni contenu, ni position, ni taille) */
+const STYLE_KEYS: { [K in LabelElement['type']]: (keyof Extract<LabelElement, { type: K }>)[] } = {
+  text: ['fontFamily', 'fontSize', 'bold', 'italic', 'underline', 'align', 'vAlign', 'fit', 'minFontSize', 'ellipsis', 'maxLines', 'lineHeight', 'color', 'invert', 'curve', 'bend', 'boldAllergens', 'autoShrink'],
+  barcode: ['showText', 'fontSize', 'color'],
+  qr: ['level', 'color'],
+  image: ['threshold', 'dither', 'keepRatio'],
+  shape: ['fill', 'stroke', 'strokeWidth', 'radius'],
+  table: ['fontFamily', 'fontSize', 'strokeWidth', 'headerRow', 'align'],
+  mark: ['color', 'strokeWidth', 'fontFamily'],
+};
+
+/** Mise en forme d'un élément (les propriétés absentes sont gardées, à undefined, pour être effacées au collage) */
+export function styleOf(el: LabelElement): StyleClip {
+  const rec = el as unknown as Record<string, unknown>;
+  const style: Record<string, unknown> = {};
+  for (const k of STYLE_KEYS[el.type] as string[]) style[k] = rec[k] === undefined ? undefined : deepClone(rec[k]);
+  return { type: el.type, style: style as Partial<LabelElement> };
+}
+
+/** Modification à appliquer à « el » pour lui donner la mise en forme copiée, ou null si le type ne correspond pas */
+export function stylePatch(el: LabelElement, clip: StyleClip): Partial<LabelElement> | null {
+  if (el.type !== clip.type) return null;
+  const p = { ...clip.style } as Record<string, unknown>;
+  if (el.type === 'shape') {
+    // l'arrondi ne vaut que pour les rectangles (le type de forme n'est pas copié)
+    if (el.kind === 'rect' || el.kind === 'roundrect') p.kind = ((p.radius as number) || 0) > 0 ? 'roundrect' : 'rect';
+    else delete p.radius;
+  }
+  return p as Partial<LabelElement>;
+}
+
+/** Ordre de parcours au clavier (Tab) : celui du panneau Calques, du premier plan vers l'arrière-plan */
+function tabUnits(els: LabelElement[]): string[][] {
+  const units = new Map<string, string[]>();
+  for (const e of [...els].reverse()) {
+    if (e.hidden) continue;
+    // un groupe est parcouru comme un seul élément (comme un clic)
+    const k = e.groups?.[0] ? 'g:' + e.groups[0] : e.id;
+    const u = units.get(k);
+    if (u) u.push(e.id);
+    else units.set(k, [e.id]);
+  }
+  return Array.from(units.values());
 }
 
 export interface PromptAsk {
@@ -110,7 +163,22 @@ interface Actions {
   addElements(els: LabelElement[], select?: boolean): void;
   removeSelected(): void;
   duplicateSelected(): void;
+  /** duplique la sélection décalée de (dx, dy) et sélectionne les copies */
+  duplicateBy(dx: number, dy: number): void;
   copySelected(): void;
+  /** copie la mise en forme du premier élément sélectionné ; false si rien n'est sélectionné */
+  copyStyle(): boolean;
+  /** applique la mise en forme copiée aux éléments sélectionnés de même type ; renvoie leur nombre */
+  pasteStyle(): number;
+  /**
+   * sélectionne l'élément suivant (1) ou précédent (-1) dans l'ordre des calques ; sans sélection,
+   * le premier (ou le dernier). Renvoie false, en vidant la sélection, quand on dépasse le bout de la liste.
+   */
+  selectStep(dir: 1 | -1): boolean;
+  /** sélectionne tous les éléments visibles du même type que la sélection */
+  selectSameType(): void;
+  toggleLockSelected(): void;
+  toggleHiddenSelected(): void;
   paste(): void;
   groupSelected(): void;
   ungroupSelected(): void;
@@ -213,6 +281,7 @@ export const useStore = create<State & Actions>()((set, get) => ({
   fitRequest: 0,
   promptAsk: null,
   remoteRequest: null,
+  styleClip: null,
 
   async init() {
     // les anciennes sauvegardes contenaient aussi past/future : ignorés (l'historique
@@ -303,6 +372,73 @@ export const useStore = create<State & Actions>()((set, get) => ({
     const src = get().doc.elements.filter((e) => sel.has(e.id));
     if (!src.length) return;
     get().addElements(cloneElements(src, 16));
+  },
+
+  duplicateBy(dx, dy) {
+    const sel = new Set(get().selected);
+    const src = get().doc.elements.filter((e) => sel.has(e.id));
+    if (!src.length) return;
+    get().addElements(cloneElements(src, dx, dy));
+  },
+
+  copyStyle() {
+    const s = get();
+    const el = s.doc.elements.find((e) => e.id === s.selected[0]);
+    if (!el) return false;
+    set({ styleClip: styleOf(el) });
+    return true;
+  },
+
+  pasteStyle() {
+    const { styleClip: clip, selected } = get();
+    if (!clip) return 0;
+    const sel = new Set(selected);
+    const ids = get()
+      .doc.elements.filter((e) => sel.has(e.id) && e.type === clip.type)
+      .map((e) => e.id);
+    if (!ids.length) return 0;
+    get().updateEls(ids, (e) => stylePatch(e, clip) ?? {});
+    return ids.length;
+  },
+
+  selectStep(dir) {
+    const s = get();
+    const units = tabUnits(s.doc.elements);
+    if (!units.length) return false;
+    const sel = new Set(s.selected);
+    const hit = units.map((u, i) => (u.some((id) => sel.has(id)) ? i : -1)).filter((i) => i >= 0);
+    let next: number;
+    if (!hit.length) next = dir > 0 ? 0 : units.length - 1;
+    else next = dir > 0 ? Math.max(...hit) + 1 : Math.min(...hit) - 1;
+    if (next < 0 || next >= units.length) {
+      set({ selected: [], editingTextId: null });
+      return false;
+    }
+    set({ selected: units[next], editingTextId: null });
+    return true;
+  },
+
+  selectSameType() {
+    const s = get();
+    const types = new Set(s.doc.elements.filter((e) => s.selected.includes(e.id)).map((e) => e.type));
+    if (!types.size) return;
+    set({ selected: s.doc.elements.filter((e) => !e.hidden && types.has(e.type)).map((e) => e.id), editingTextId: null });
+  },
+
+  toggleLockSelected() {
+    const s = get();
+    const sel = s.doc.elements.filter((e) => s.selected.includes(e.id));
+    if (!sel.length) return;
+    const locked = sel.every((e) => e.locked);
+    s.updateEls(s.selected, { locked: !locked });
+  },
+
+  toggleHiddenSelected() {
+    const s = get();
+    const sel = s.doc.elements.filter((e) => s.selected.includes(e.id));
+    if (!sel.length) return;
+    const hidden = sel.every((e) => e.hidden);
+    s.updateEls(s.selected, { hidden: !hidden });
   },
 
   groupSelected() {
@@ -451,13 +587,13 @@ export const useStore = create<State & Actions>()((set, get) => ({
 }));
 
 /** Copies décalées d'éléments : nouveaux identifiants, groupes renommés, déverrouillées */
-function cloneElements(src: LabelElement[], off: number): LabelElement[] {
+function cloneElements(src: LabelElement[], dx: number, dy = dx): LabelElement[] {
   const gmap = new Map<string, string>();
   return deepClone(src).map((e) => ({
     ...e,
     id: uid(),
-    x: e.x + off,
-    y: e.y + off,
+    x: e.x + dx,
+    y: e.y + dy,
     locked: false,
     groups: e.groups?.map((g) => {
       if (!gmap.has(g)) gmap.set(g, uid());

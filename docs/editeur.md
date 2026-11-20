@@ -61,7 +61,7 @@ L’ajustement est recalculé **pour chaque ligne de données**, à l’écran c
 - Déplacer, redimensionner, faire pivoter (aimantation tous les 45°), *Pivoter de 90°*, *Miroir horizontal* / *vertical*, *Réduire pour tenir dans l’étiquette*, *Verrouiller (empêche de déplacer)*, *Premier plan* / *Arrière-plan*.
 - **Groupes** imbriqués : Ctrl+G / Ctrl+Maj+G ; **Alt + clic** sélectionne un élément à l’intérieur d’un groupe.
 - Panneau *Position et taille* : X, Y, largeur, hauteur, rotation, nom du calque.
-- Menu contextuel (clic droit ou appui long) : copier, coller, coller une image, dupliquer, supprimer, premier plan / arrière-plan, grouper / dégrouper, verrouiller, tout sélectionner, *Insérer* (estampille sanitaire, *Quantité estimée* — signe ℮ —, *Mes pictogrammes…*), *Conformité alimentaire…*, *Décaler* (gauche, haut, bas, droite).
+- Menu contextuel (clic droit ou appui long) : copier, coller, *Copier / Coller la mise en forme*, coller une image, dupliquer, supprimer, premier plan, *Avancer d’un plan*, *Reculer d’un plan*, arrière-plan, grouper / dégrouper, verrouiller, masquer / afficher, tout sélectionner, *Sélectionner les éléments du même type*, *Insérer* (estampille sanitaire, *Quantité estimée* — signe ℮ —, *Mes pictogrammes…*), *Conformité alimentaire…*, *Décaler* (gauche, haut, bas, droite).
 
 ### Alignement et répartition
 
@@ -70,6 +70,31 @@ Avec un ou plusieurs éléments sélectionnés :
 - *Aligner à gauche*, *Centrer horizontalement*, *Aligner à droite*, *Aligner en haut*, *Centrer verticalement*, *Aligner en bas* — **sur l’étiquette** ou **entre eux** (choix « Aligner sur l’étiquette » / « Aligner entre eux »).
 - *Répartir horizontalement* / *Répartir verticalement* : espacement égal (3 éléments ou plus).
 - *Même largeur* / *Même hauteur* que le premier élément sélectionné.
+
+### Modifier plusieurs éléments à la fois
+
+Quand tous les éléments sélectionnés sont du même type, le panneau affiche leurs propriétés communes ; une modification s’applique à tous et s’annule en une seule fois (Ctrl+Z) :
+
+- **textes** : police, taille, alignement, gras, italique, souligné, couleur, interligne, inverser, ajustement du texte ;
+- **codes-barres** : symbologie, afficher le texte lisible et sa taille, couleur ;
+- **formes** : remplissage, bordure, épaisseur de bordure ;
+- **QR codes** : correction d’erreur, couleur ; **images** : seuil, tramage ; **tableaux** : police, taille du texte, épaisseur des traits ; **estampilles / signes ℮** : couleur.
+
+Une valeur qui diffère selon les éléments s’affiche « — » (ou un champ vide, une case à cocher indéterminée). Pour une sélection de types différents, le panneau garde l’alignement et la répartition, plus la rotation et le verrouillage.
+
+### Copier la mise en forme
+
+**Ctrl+Alt+C** (ou clic droit › *Copier la mise en forme*) mémorise la mise en forme du premier élément sélectionné — pas son contenu, sa position ni sa taille. **Ctrl+Alt+V** (*Coller la mise en forme*) l’applique, en une étape d’annulation, aux éléments sélectionnés **du même type** ; les autres sont ignorés. La mise en forme copiée est oubliée au rechargement de la page.
+
+| Type | Mise en forme copiée |
+| --- | --- |
+| Texte | police, taille, gras, italique, souligné, alignements, ajustement (mode, taille minimale, lignes max, « … »), interligne, couleur, inverser, courbe, allergènes en gras |
+| Code-barres | texte lisible et sa taille, couleur (pas la symbologie) |
+| QR code | correction d’erreur, couleur |
+| Image | seuil, tramage, conserver les proportions |
+| Forme | remplissage, bordure, épaisseur, arrondi des coins (rectangles) |
+| Tableau | police, taille du texte, épaisseur des traits, ligne d’en-tête, alignement |
+| Estampille / ℮ | couleur, épaisseur, police |
 
 ### Calques
 
@@ -96,13 +121,20 @@ Liste de l’aide intégrée (*Aide* → *Aide et raccourcis*), complétée des 
 
 | Raccourci | Action |
 | --- | --- |
-| Ctrl+Z | Annuler (80 étapes, conservées après un rafraîchissement) |
+| Ctrl+Z | Annuler (80 étapes ; l’historique d’annulation n’est pas sauvegardé : il est effacé au rechargement de la page) |
 | Ctrl+Y / Ctrl+Maj+Z | Rétablir |
 | Ctrl+C / Ctrl+V | Copier / coller (images comprises) |
+| Ctrl+Alt+C / Ctrl+Alt+V | Copier / coller la mise en forme ([détails](#copier-la-mise-en-forme)) |
 | Ctrl+X | Couper |
 | Ctrl+D | Dupliquer |
+| Alt+flèche | Dupliquer la sélection en la décalant d’un pas de grille dans la direction de la flèche (la copie est sélectionnée : répéter pour faire une rangée) |
 | Ctrl+G / Ctrl+Maj+G | Grouper / dégrouper |
+| Ctrl+] / Ctrl+[ | Avancer / reculer d’un plan (clavier AZERTY : Ctrl+$ / Ctrl+^, mêmes touches physiques) |
+| Ctrl+Maj+] / Ctrl+Maj+[ | Premier plan / arrière-plan (AZERTY : Ctrl+Maj+$ / Ctrl+Maj+^) |
+| Ctrl+Maj+L | Verrouiller / déverrouiller la sélection |
+| Ctrl+Maj+H | Masquer / afficher la sélection |
 | Ctrl+A | Tout sélectionner |
+| Tab / Maj+Tab | Élément suivant / précédent, dans l’ordre du panneau Calques (du premier plan vers l’arrière-plan ; un groupe compte pour un élément, les éléments masqués sont sautés). Sans sélection : le premier (Maj+Tab : le dernier). Après le dernier, la sélection est vidée et Tab reprend son rôle habituel (passer d’un bouton à l’autre). Actif quand le focus n’est ni sur un bouton ni dans un panneau. |
 | Suppr (ou Retour arrière) | Supprimer la sélection |
 | Flèches | Déplacer de 1 point (Maj : 10 points) |
 | Entrée | Modifier le texte sélectionné |
@@ -139,7 +171,7 @@ inventaire entrepôt 4×2, expédition 4×6, produit EAN-13 2×2, étiquette QR 
 
 ## Enregistrement
 
-- **Sauvegarde automatique** du document en cours (avec son zoom et l’historique d’annulation) dans le navigateur.
+- **Sauvegarde automatique** du document en cours (avec son zoom) dans le navigateur. L’historique d’annulation (80 étapes) n’est pas sauvegardé : il repart de zéro au rechargement de la page.
 - **Enregistrer** (Ctrl+S) ajoute ou met à jour l’étiquette dans **Mes étiquettes** : jusqu’à 50 modèles (IndexedDB), avec miniature, du plus récent au plus ancien ; renommer, dupliquer, supprimer.
 - *Options* › **Design modifiable** : *Copier l’étiquette (JSON)*, *Coller une étiquette (JSON)*, *Exporter l’étiquette* (fichier `.json`), *Importer une étiquette*. C’est le moyen de sauvegarder vos modèles hors du navigateur ou de les transférer sur un autre poste.
 - *Options* › **Langue** : français ou anglais (ou `?lang=en` dans l’adresse).

@@ -194,3 +194,25 @@ describe('confirmation avant de remplacer l’étiquette en cours', () => {
     expect(res.ok).toBe(false);
   });
 });
+
+describe('file d’impression commune', () => {
+  it('la demande apparaît dans la file, terminée après l’impression', async () => {
+    const { useQueue } = await import('./printQueue');
+    editorWithWork(false);
+    setAutoPrint('model-1', 'Colis', 'https://erp.example', true);
+    const res = await runRemote({ modele: 'Colis', rows: [{ nom: 'A' }], imprimer: 'zpl', source: 'https://erp.example' });
+    expect(res).toEqual({ ok: true, count: 1 });
+    const it = useQueue.getState().items.slice(-1)[0];
+    expect(it).toMatchObject({ kind: 'remote', name: 'Colis', status: 'done', source: 'https://erp.example' });
+  });
+
+  it('demande refusée : statut « annulé »', async () => {
+    const { useQueue } = await import('./printQueue');
+    editorWithWork(false);
+    const p = runRemote({ modele: 'Colis', imprimer: 'zpl', source: 'https://erp.example' });
+    const req = await waitRequest(p);
+    req!.resolve(false, false);
+    expect((await p).ok).toBe(false);
+    expect(useQueue.getState().items.slice(-1)[0].status).toBe('cancelled');
+  });
+});

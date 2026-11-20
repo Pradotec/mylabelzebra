@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { resolveText, serialValue, formatDate, dateValue, batchJobs, batchCount, docUsesSerial, usesData, ctxFor, type ResolveCtx } from './resolve';
-import { parseDate, parseNumber, conditionHolds, promptFields, promptSpecs, unknownFilters, calcExpr, numText, roundTo, jobPosition, serialNextStart, parseSerialAlpha, FILTERS } from './resolve';
+import { parseDate, parseNumber, conditionHolds, promptFields, promptSpecs, unknownFilters, calcExpr, numText, roundTo, jobPosition, serialNextStart, parseSerialAlpha, FILTERS, checkDigits, partOf, fieldKeys, isSpecialKey, conditionKey } from './resolve';
 import { validatePrompt, validatePrompts, isValidGtin, gs1CheckDigit, type PromptSpec } from '../prompts';
 import { newDoc, makeText, makeBarcode } from '../elements';
 import type { LabelDoc, DataSet } from '../types';
@@ -587,5 +587,79 @@ describe('SSCC {{#sscc}} — aperçu et travail', () => {
     const doc = newDoc();
     doc.elements = [{ ...makeText(doc, '{{#sscc}}'), hidden: true }];
     expect(docUsesSscc(doc)).toBe(false);
+  });
+});
+
+describe('filtres partie / extraire / clegtin / controle (emplacements)', () => {
+  const row = { Emplacement: 'ZB1-01-01-A1', Ref: 'ART1000001 (CMR) / ART1000002', Liste: 'a, b ,c', Mots: 'un  deux trois', Ean: '200000000001', Vide: '' };
+  it('partie : N-ième morceau, négatif depuis la fin, espaces retirés', () => {
+    expect(R('{{Emplacement|partie:4,-}}', row)).toBe('A1');
+    expect(R('{{Emplacement|partie:1,-}}', row)).toBe('ZB1');
+    expect(R('{{Emplacement|partie:-2,-}}', row)).toBe('01');
+    expect(R('{{Ref|partie:1,/}}', row)).toBe('ART1000001 (CMR)');
+    expect(R('{{Ref|partie:-1,/}}', row)).toBe('ART1000002');
+  });
+  it('partie : morceau inexistant → vide, N illisible → inchangé', () => {
+    expect(R('[{{Emplacement|partie:9,-}}]', row)).toBe('[]');
+    expect(R('[{{Emplacement|partie:0,-}}]', row)).toBe('[]');
+    expect(R('{{Emplacement|partie:x,-}}', row)).toBe('ZB1-01-01-A1');
+    expect(R('[{{Vide|partie:1,-}}]', row)).toBe('[]');
+  });
+  it('partie : séparateur virgule, entre guillemets, ou espaces par défaut', () => {
+    expect(R('{{Liste|partie:2,,}}', row)).toBe('b');
+    expect(R('{{Emplacement|partie:2,"-0"}}', row)).toBe('1');
+    expect(R('{{Mots|partie:2}}', row)).toBe('deux');
+    expect(R('{{Mots|partie:-1, }}', row)).toBe('trois');
+  });
+  it('extraire : correspondance, groupe 1, vide sinon, regex invalide → inchangé', () => {
+    expect(R('{{Ref|extraire:^[^ (]+}}', row)).toBe('ART1000001');
+    expect(R('{{Ref|extraire:\\((\\w+)\\)}}', row)).toBe('CMR');
+    expect(R('[{{Ref|extraire:^ZZZ}}]', row)).toBe('[]');
+    expect(R('{{Ref|extraire:(}}', row)).toBe('ART1000001 (CMR) / ART1000002');
+    expect(R('{{Emplacement|extraire:[A-Z]\\d+$}}', row)).toBe('A1');
+  });
+  it('clegtin : ajoute la clé GS1 aux longueurs connues seulement', () => {
+    expect(R('{{Ean|clegtin}}', row)).toBe('2000000000015');
+    expect(R('{{c|clegtin}}', { c: '1234567' })).toBe('12345670');
+    expect(R('{{c|clegtin}}', { c: '03600029145' })).toBe('036000291452');
+    expect(R('{{c|clegtin}}', { c: '1061414100004' })).toBe('10614141000040');
+    expect(R('{{c|clegtin}}', { c: '00614141123456789' })).toBe('006141411234567890');
+    expect(R('{{c|clegtin}}', { c: '2000000000015' })).toBe('20000000000158');
+    expect(R('{{c|clegtin}}', { c: '12345' })).toBe('12345');
+    expect(R('{{c|clegtin}}', { c: '12A4567' })).toBe('12A4567');
+    expect(R('[{{Vide|clegtin}}]', row)).toBe('[]');
+  });
+  it('controle : chiffres stables (FNV-1a), 2 par défaut, bornés 1 à 4', () => {
+    expect(R('{{Emplacement|controle}}', row)).toBe('37');
+    expect(R('{{Emplacement|controle:2}}', row)).toBe('37');
+    expect(R('{{Emplacement|controle:3}}', row)).toBe('837');
+    expect(R('{{e|controle:4}}', { e: 'ZB1-04-03-B1' })).toBe('0363');
+    expect(R('{{e|controle:9}}', { e: 'ZB1-04-03-B1' })).toBe('0363');
+    expect(R('{{e|controle:0}}', { e: 'a' })).toBe('0');
+    expect(R('{{e|controle}}', { e: ' ZB1-01-01-A2 ' })).toBe('80');
+    expect(checkDigits('a', 4)).toBe('2220');
+    expect(checkDigits('é', 2)).toBe('17');
+    expect(R('[{{Vide|controle}}]', row)).toBe('[]');
+    expect(R('{{e|controle:x}}', { e: 'a' })).toBe('a');
+  });
+  it('enchaînement et filtres connus', () => {
+    expect(R('{{Emplacement|partie:4,-|controle:2}}', row)).toBe(checkDigits('A1', 2));
+    expect(unknownFilters('{{a|partie:1,-|extraire:x|clegtin|controle:2}}')).toEqual([]);
+    expect(partOf('A/B', '2,/')).toBe('B');
+  });
+});
+
+describe('fieldKeys / isSpecialKey / conditionKey', () => {
+  it('liste les clés des champs', () => {
+    expect(fieldKeys('{{Ref|partie:1,/}} {{ Emplacement }} {{numero}}')).toEqual(['Ref', 'Emplacement', 'numero']);
+    expect(fieldKeys('sans champ')).toEqual([]);
+  });
+  it('reconnaît les champs calculés', () => {
+    for (const k of ['numero', '#', '#pos', '#total', '#sscc', 'date', 'date+30', 'aujourdhui', '?Lot']) expect(isSpecialKey(k)).toBe(true);
+    expect(isSpecialKey('Emplacement')).toBe(false);
+  });
+  it('clé d’une condition', () => {
+    expect(conditionKey({ field: '{{poids|arrondi:0}}', op: 'empty' })).toBe('poids');
+    expect(conditionKey({ field: 'lot', op: 'empty' })).toBe('lot');
   });
 });

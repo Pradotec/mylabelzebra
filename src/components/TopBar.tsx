@@ -1,4 +1,5 @@
-import { Undo2, Redo2, HelpCircle, Plus, FolderOpen, Save, FileText, FileDown, FileUp, Image as ImageIcon, FileType, Copy, Download, ScanLine, ClipboardCopy, ClipboardPaste, Languages, Barcode, QrCode, Grid3x3, Printer, Check, History, Truck, Apple } from 'lucide-react';
+import { Undo2, Redo2, HelpCircle, Plus, FolderOpen, Save, FileText, FileDown, FileUp, Image as ImageIcon, FileType, Copy, Download, ScanLine, ClipboardCopy, ClipboardPaste, Languages, Barcode, QrCode, Grid3x3, Printer, Check, History, Truck, Apple, ScanBarcode, ListOrdered } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { Dropdown } from './ui';
 import { t, getLang, setLang, LANGS } from '../i18n';
@@ -8,6 +9,9 @@ import { startJob } from '../jobs';
 import { copyText, pickFile } from '../util';
 import { openCarrierDialog } from './CarrierDialog';
 import { openNutritionDialog } from './NutritionDialog';
+import { useQueue, activeCount } from '../printQueue';
+import { PrintQueuePanel } from './PrintQueuePanel';
+import { StationMode } from './StationMode';
 
 export function Logo({ size = 30 }: { size?: number }) {
   return (
@@ -28,9 +32,41 @@ export function Logo({ size = 30 }: { size?: number }) {
   );
 }
 
+/** Indicateur de la file d'impression (nombre de travaux actifs) ; ouvre le panneau */
+function QueueButton({ onClick, open }: { onClick: () => void; open: boolean }) {
+  const n = useQueue((s) => activeCount(s.items));
+  const paused = useQueue((s) => s.items.some((i) => i.status === 'paused'));
+  return (
+    <button
+      className={'icon-btn' + (open ? ' on' : '')}
+      aria-label={n ? t('File d’impression : {n} travail(aux) en cours', { n }) : t('File d’impression')}
+      title={n ? t('File d’impression : {n} travail(aux) en cours', { n }) : t('File d’impression')}
+      aria-expanded={open}
+      onClick={onClick}
+      style={{ position: 'relative' }}
+    >
+      <ListOrdered size={18} />
+      {n > 0 && (
+        <span className="badge" style={{ position: 'absolute', top: -4, right: -4, background: paused ? 'var(--err)' : undefined }}>
+          {n}
+        </span>
+      )}
+    </button>
+  );
+}
+
 export function TopBar() {
   const st = useStore();
   const { doc } = st;
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [station, setStation] = useState(false);
+  // un travail se met en pause sur un problème d'imprimante : le panneau s'ouvre
+  const problemId = useQueue((s) => s.items.find((i) => i.status === 'paused' && i.problem)?.id);
+  const lastProblem = useRef<string | undefined>();
+  useEffect(() => {
+    if (problemId && problemId !== lastProblem.current && !station) setQueueOpen(true);
+    lastProblem.current = problemId;
+  }, [problemId, station]);
   const copyZpl = () => startJob('zpl-copie');
   const dlZpl = () => startJob('zpl-fichier');
   const importLabel = async () => {
@@ -80,6 +116,11 @@ export function TopBar() {
         }}
       />
       <span className="spacer" />
+      <QueueButton open={queueOpen} onClick={() => setQueueOpen((o) => !o)} />
+      {/* position relative : au-dessus du nom du document (centré en absolu) sur écran moyen, sinon le bouton n'est plus cliquable */}
+      <button className="btn hide-sm" style={{ position: 'relative' }} onClick={() => setStation(true)} title={t('Écran « scanner → imprimer » pour un poste de préparation (douchette USB)')} aria-label={t('Mode poste')}>
+        <ScanBarcode size={17} /> <span className="hide-sm">{t('Mode poste')}</span>
+      </button>
       <button className="icon-btn hide-sm" aria-label={t('Mes étiquettes')} title={t('Mes étiquettes')} onClick={() => st.set('modal', 'saved')}>
         <FolderOpen size={18} />
       </button>
@@ -107,6 +148,12 @@ export function TopBar() {
               </button>
               <button className="mi" onClick={go(() => st.set('modal', 'history'))}>
                 <History size={16} /> {t('Historique d’impression')}
+              </button>
+              <button className="mi" onClick={go(() => setQueueOpen(true))}>
+                <ListOrdered size={16} /> {t('File d’impression')}
+              </button>
+              <button className="mi" onClick={go(() => setStation(true))}>
+                <ScanBarcode size={16} /> {t('Mode poste (scanner → imprimer)')}
               </button>
               <button className="mi" onClick={go(() => st.set('modal', 'help'))}>
                 <HelpCircle size={16} /> {t('Aide et raccourcis')}
@@ -186,6 +233,8 @@ export function TopBar() {
           );
         }}
       </Dropdown>
+      {queueOpen && <PrintQueuePanel onClose={() => setQueueOpen(false)} />}
+      {station && <StationMode onClose={() => setStation(false)} />}
     </header>
   );
 }

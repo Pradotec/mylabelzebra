@@ -5,7 +5,10 @@ Une étiquette peut être imprimée en série à partir d’un tableau : **une l
 ![Panneau Données](images/donnees.png)
 
 - [Importer des données](#importer-des-données)
-- [Choisir les lignes à imprimer](#choisir-les-lignes-à-imprimer)
+- [Choisir les lignes à imprimer](#choisir-les-lignes-à-imprimer) (filtres, tri, *Aller à…*)
+- [Vérifier le lot](#vérifier-le-lot)
+- [Éclater une colonne](#éclater-une-colonne)
+- [Générer des emplacements](#générer-des-emplacements)
 - [Champs](#champs)
 - [Filtres](#filtres)
 - [Dates](#dates)
@@ -38,10 +41,69 @@ Les données sont enregistrées **avec l’étiquette** (dans le navigateur). *R
 ## Choisir les lignes à imprimer
 
 - Chaque ligne a une **case à cocher** (décochée à l’import) et un **nombre de copies** (×, de 1 à 999).
-- *Tout* / *Aucune* ; **recherche** dans toutes les colonnes et **critère** sur une colonne (*contient*, *=*, *est vide*, *n’est pas vide*), puis *Cocher les lignes filtrées* / *Décocher*. Les comparaisons ignorent la casse et les accents.
+- *Tout* / *Aucune* ; **recherche** dans toutes les colonnes et **critère** sur une colonne (*contient*, *=*, *≠*, *est vide*, *n’est pas vide*, *doublon*, *EAN/GTIN invalide* — [détails](#critères-de-filtre)), puis *Cocher les lignes filtrées* / *Décocher*. Les comparaisons ignorent la casse et les accents.
 - Cliquer sur une ligne l’affiche sur l’étiquette ; le curseur en bas de l’éditeur parcourt les lignes ; *Modifier la ligne* (crayon) corrige une valeur.
 - *Afficher les valeurs (sinon les {{champs}})* bascule entre l’aperçu des données et l’affichage des champs bruts.
 - Impression et export produisent **une étiquette par ligne cochée** (× copies). **Si aucune ligne n’est cochée, seule la ligne affichée est imprimée.**
+
+### Critères de filtre
+
+| Critère | Lignes gardées |
+| --- | --- |
+| *contient*, *=*, *≠* | la valeur de la colonne contient / est égale / est différente de la valeur saisie |
+| *est vide*, *n’est pas vide* | cellule vide ou non |
+| *doublon* | valeur non vide présente **sur plusieurs lignes** de la colonne : deux produits rangés dans le même `Emplacement`, un `Eaninterne` attribué deux fois… |
+| *EAN/GTIN invalide* | valeur non vide qui n’est pas un GTIN de 8, 12, 13 ou 14 chiffres **avec une clé correcte** (`2000000000016` ou `/` dans `Eaninterne`) |
+
+### Trier
+
+Cliquez sur un **en-tête de colonne** du tableau pour trier les lignes (croissant ; un second clic : décroissant). Le tri est **naturel** : `ZB1-01-02` vient avant `ZB1-01-10`, `9` avant `10` ; il ignore la casse et les accents, et les cellules vides restent à la fin. Les cases cochées et les copies suivent leur ligne, et la ligne affichée reste la même. Le tri modifie l’ordre d’impression (donc `{{numero}}` et `{{#pos}}`) ; **Ctrl+Z** l’annule.
+
+### Aller à une ligne
+
+Le champ **Aller à…** accepte un **numéro de ligne** (`120`) ou un **texte à chercher** dans toutes les colonnes (`ZB1-04-03`, `ART1000002`, `CMR`). La ligne trouvée s’affiche sur l’étiquette et dans le tableau ; **Entrée** passe à l’occurrence suivante (« occurrence 2 sur 72 »), Échap efface. Un nombre plus grand que le nombre de lignes est cherché comme texte.
+
+## Vérifier le lot
+
+Le bouton **Vérifier le lot** (panneau Données) contrôle **les lignes cochées** (toutes les lignes si aucune n’est cochée) avec la même résolution des champs et la même mise en page que l’impression :
+
+| Anomalie | Exemple (étiquette emplacement) |
+| --- | --- |
+| **Colonne introuvable** — `{{colonne}}` utilisée par le modèle (textes, codes, conditions) mais absente des données : une seule alerte, sans numéro de ligne | `{{Fournisseurr}}` ou `{{Emplacment}}` |
+| **Code-barres invalide** pour sa symbologie (longueur, caractères, clé, AI GS1) | EAN-13 `2000000000016` (clé fausse) |
+| **Champ vide** — texte alimenté par une colonne dont la valeur est vide, ou code-barres vide ou valant `/` | emplacement `/` |
+| **Code-barres en double** — même valeur sur deux lignes contrôlées (signalée sur la seconde, avec le numéro de la première) ; ignoré pour un code fixe ou ne dépendant que de `{{numero}}` / `{{?saisie}}` | deux lignes `ZB1-01-01-A1` |
+| **Texte réduit ou tronqué** — texte réduit jusqu’à sa taille minimale (*Une ligne, réduire* / *Retour à la ligne, réduire*) ou coupé (lignes en trop, « … ») | désignation produit trop longue |
+
+- Un badge indique le nombre d’anomalies ; la liste est **groupée par type** (100 entrées affichées par groupe). Un clic sur une entrée affiche la ligne et **sélectionne l’élément** concerné.
+- **Anomalie suivante** parcourt toutes les anomalies dans l’ordre des lignes.
+- **Décocher les lignes en anomalie** retire ces lignes de l’impression (Ctrl+Z pour annuler).
+- La vérification s’exécute par tranches avec une barre de progression (annulable) : 5 000 lignes restent fluides. Si l’étiquette ou les données changent ensuite, un message invite à la relancer.
+
+## Éclater une colonne
+
+**Éclater la colonne…** (panneau Données, *Outils*) crée **une ligne par valeur** ; les autres colonnes, la case cochée et les copies sont recopiées. Un aperçu indique le résultat (« 360 lignes → 377 ») et un exemple avant validation ; **Ctrl+Z** annule.
+
+- **Séparateur** `/`, `;`, `,` ou `|` : `ART1000001 (CMR) / ART1000002` → `ART1000001 (CMR)` et `ART1000002` (espaces retirés, morceaux vides ignorés).
+- **Cases multiples** : le préfixe jusqu’au dernier `-` est conservé et le dernier segment est découpé en motifs lettre + chiffres : `ZB1-04-03-B1B5C1C3` → `ZB1-04-03-B1`, `ZB1-04-03-B5`, `ZB1-04-03-C1`, `ZB1-04-03-C3`. Une valeur qui ne suit pas ce motif (`ZB1-01-01-A1`, `/`) reste inchangée.
+
+Le résultat est limité à 5 000 lignes.
+
+## Générer des emplacements
+
+**Générer des emplacements…** (panneau Données, avec ou sans données) crée la liste de toutes les combinaisons de **segments** :
+
+| Segment | Type | Valeurs |
+| --- | --- | --- |
+| Zone | texte fixe | `ZB1` |
+| Allée | nombres 1 → 4, 2 chiffres | `01` … `04` |
+| Travée | nombres 1 → 10, 2 chiffres | `01` … `10` |
+| Niveau | lettres A → E | `A` … `E` |
+| Position | nombres 1 → 5 | `1` … `5` |
+
+Avec le modèle `{Zone}-{Allée}-{Travée}-{Niveau}{Position}`, on obtient 4 × 10 × 5 × 5 = **1 000 lignes** : `ZB1-01-01-A1`, `ZB1-01-01-A2`… `ZB1-04-10-E5` (le dernier segment varie le plus vite). Chaque segment devient une colonne, plus la colonne du résultat (`Emplacement` par défaut). Les plages peuvent être décroissantes (`5 → 1`, `E → A`) ; un modèle vide accole les segments.
+
+Les lignes générées **remplacent** les données ou s’**ajoutent** aux lignes existantes (colonnes réunies), dans la limite de 5 000 lignes ; Ctrl+Z annule.
 
 ## Champs
 
@@ -86,12 +148,18 @@ Les filtres se placent après le nom du champ, séparés par `|`, et s’appliqu
 | `remplacer:A:B` | remplace le texte A par B (B vide = suppression) | `{{ref|remplacer:-:/}}` : `A-12` → `A/12` |
 | `chiffres` | ne garde que les chiffres | `{{tel|chiffres}}` ; `{{poids|nombre:3|chiffres}}` : `1,25` → `1250` |
 | `cleprix` | EAN-13 à prix variable : ajoute la clé « prix » devant 4 chiffres | `{{prix|nombre:2|chiffres|pad:4|cleprix}}` |
+| `partie:N,SEP` | N-ième morceau après découpage par SEP (1 = premier, négatif = depuis la fin), espaces retirés ; morceau inexistant → vide. SEP = tout ce qui suit la première virgule (`partie:2,,` découpe aux virgules) ; entre guillemets s’il contient des espaces (`partie:2," - "`) ; omis = suite d’espaces | `{{Emplacement|partie:4,-}}` : `ZB1-01-01-A1` → `A1` ; `{{Ref|partie:1,/}}` : `ART1000001 (CMR) / ART1000002` → `ART1000001 (CMR)` ; `{{Ref|partie:-1,/}}` → `ART1000002` |
+| `extraire:REGEX` | première correspondance de l’expression régulière (le groupe 1 s’il existe), vide si rien ne correspond ; expression invalide → valeur inchangée | `{{Ref|extraire:^[^ (]+}}` → `ART1000001` ; `{{Ref|extraire:\((\w+)\)}}` → `CMR` |
+| `clegtin` | ajoute la clé de contrôle GS1 (modulo 10) à 7, 11, 12, 13 ou 17 chiffres (EAN-8, UPC-A, EAN-13, GTIN-14, SSCC) ; autre valeur inchangée | `{{Eaninterne|clegtin}}` : `200000000001` → `2000000000015` |
+| `controle:N` | N chiffres de contrôle **stables** calculés à partir de la valeur (1 à 4, 2 par défaut) — « check digits » d’emplacement à imprimer en gros pour la préparation / le picking vocal ; vide si la valeur est vide | `{{Emplacement|controle}}` : `ZB1-01-01-A1` → `37` ; `{{Emplacement|controle:3}}` → `837` |
 
 Alias acceptés : `défaut` / `default` → `defaut`, `upper` / `majuscules` → `maj`, `lower` / `minuscules` → `min`, `replace` → `remplacer`, `days` → `jours`, `round` → `arrondi`, `substr` → `sous`. Les noms de filtres ne tiennent pas compte de la casse.
 
 Lecture des nombres (`nombre`, `arrondi`, `calc`, `prix`, `prixkg`) : `1 234,5`, `1234.5`, `1.234,50`, `12,50 €` sont reconnus ; une valeur non numérique est laissée telle quelle. Les résultats de `calc` et `arrondi` utilisent la virgule décimale, sans séparateur de milliers (ils peuvent être enchaînés avec `nombre` ou `prix`).
 
-**Limite** : un `|` ne peut pas figurer dans l’argument d’un filtre (`remplacer`, `defaut`, `regex`…).
+**Limite** : un `|` ne peut pas figurer dans l’argument d’un filtre (`remplacer`, `defaut`, `regex`, `extraire`…), ni une accolade fermante `}` : pour `extraire`, écrivez `\d\d\d\d` plutôt que `\d{4}`, et pas d’alternative `a|b`.
+
+**Calcul de `controle`** (reproductible dans un tableur ou un WMS) : hash **FNV-1a 32 bits** des octets UTF-8 de la valeur sans espaces autour — `h = 2166136261`, puis pour chaque octet `b` : `h = (h XOR b) × 16777619 mod 2³²` — puis `h mod 10^N`, complété par des zéros devant. Les chiffres ne changent jamais pour un même emplacement ; deux emplacements différents peuvent avoir les mêmes chiffres (1 chance sur 100 avec N = 2) : ils servent à confirmer qu’on est devant la bonne case, pas à identifier l’emplacement. Exemples : `ZB1-01-01-A1` → `37`, `ZB1-01-01-A2` → `80`, `ZB1-04-03-B1` → `63`.
 
 ## Dates
 

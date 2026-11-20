@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { FolderOpen, Trash2, Copy, Pencil, HelpCircle, Printer, Monitor, RefreshCw, AlertTriangle, CheckCircle2, Download, FileDown, Grid3x3, Barcode, QrCode, Plus, ExternalLink, Settings2, History, RotateCcw, FormInput } from 'lucide-react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { FolderOpen, Trash2, Copy, Pencil, HelpCircle, Printer, Monitor, RefreshCw, AlertTriangle, CheckCircle2, Download, FileDown, Grid3x3, Barcode, QrCode, Plus, ExternalLink, Settings2, History, RotateCcw, FormInput, Play } from 'lucide-react';
 import { useStore } from '../store';
 import { Modal, NumField, Seg, Check } from './ui';
 import { t, tc, getLang, setLang, LANGS } from '../i18n';
@@ -7,7 +7,8 @@ import { listSaved, deleteSaved, renameSaved, duplicateSaved, confirmDiscard, MA
 import type { SavedLabel, Symbology, QrLevel, LabelDoc } from '../types';
 import { batchJobs } from '../render/resolve';
 import { testPrint, sheetPages } from '../export';
-import { startJob, listHistory, clearHistory, deleteHistory, reprint, historyDocForEditing, JOB_LABELS, MAX_HISTORY, type HistoryEntry } from '../jobs';
+import { startJob, listHistory, clearHistory, deleteHistory, reprint, resumeHistory, isIncomplete, plannedCount, historyDocForEditing, JOB_LABELS, MAX_HISTORY, type HistoryEntry } from '../jobs';
+import { useQueue, isActive } from '../printQueue';
 import * as zebra from '../zebra';
 import { SHEETS, sheetById, sizeLabel } from '../sizes';
 import { SYMBOLOGIES, encodeBarcode, encodeQr, is2D } from '../render/codes';
@@ -21,6 +22,33 @@ import { validatePrompts, type PromptError, type PromptSpec } from '../prompts';
 import { openSideDialog, useFoodReport } from './SideDialogs';
 
 const closeModal = () => useStore.getState().set('modal', null);
+
+/**
+ * Lance un travail et appelle `onQueued` dès qu'il entre dans la file d'impression
+ * (Zebra, « Cet ordinateur », planches, réimpression, reprise) : la fenêtre n'attend pas la
+ * fin de l'envoi, qui peut rester en pause (imprimante pas prête) — le panneau de la file
+ * prend le relais. Les exports de fichiers n'entrent pas dans la file : `onQueued` n'est
+ * pas appelé et la promesse se résout à la fin du travail, comme avant.
+ */
+async function runUntilQueued<T>(start: () => Promise<T>, onQueued: (ahead: number) => void): Promise<T> {
+  const before = useQueue.getState().items;
+  const known = new Set(before.map((i) => i.id));
+  const ahead = before.filter((i) => isActive(i.status)).length;
+  let queued = false;
+  const unsub = useQueue.subscribe((s) => {
+    if (queued || !s.items.some((i) => !known.has(i.id))) return;
+    queued = true;
+    onQueued(ahead);
+  });
+  try {
+    return await start();
+  } finally {
+    unsub();
+  }
+}
+
+/** Message quand un travail attend son tour derrière d'autres */
+const toastQueuedBehind = (ahead: number) => ahead > 0 && useStore.getState().toast(t('Ajouté à la file d’impression : {n} travail(aux) avant celui-ci.', { n: ahead }), 'info');
 
 // ---------- Mes étiquettes ----------
 export function SavedLabels() {
@@ -252,10 +280,28 @@ export function HistoryModal() {
   const st = useStore();
   const [list, setList] = useState<HistoryEntry[] | null>(null);
   const [busy, setBusy] = useState('');
+  /** entrée incomplète dont on règle le numéro de reprise */
+  const [resumeAt, setResumeAt] = useState<{ id: string; from: number } | null>(null);
   const refresh = () => listHistory().then(setList);
   useEffect(() => {
     refresh();
   }, []);
+  // réimpression / reprise : boutons bloqués jusqu'à l'entrée dans la file seulement (un
+  // envoi Zebra en pause ne bloque pas la fenêtre) ; liste relue à la fin du travail
+  const launch = async (id: string, start: () => Promise<unknown>) => {
+    setBusy(id);
+    let queued = false;
+    try {
+      await runUntilQueued(start, (ahead) => {
+        queued = true;
+        setBusy('');
+        toastQueuedBehind(ahead);
+      });
+    } finally {
+      if (!queued) setBusy('');
+      refresh();
+    }
+  };
   const fmt = (n: number) => new Date(n).toLocaleString(getLang() === 'fr' ? 'fr-FR' : 'en-US', { dateStyle: 'short', timeStyle: 'medium' });
   const rowsLabel = (e: HistoryEntry) => {
     if (!e.rows.length) return '';
@@ -302,16 +348,23 @@ export function HistoryModal() {
               </tr>
             </thead>
             <tbody>
-              {list.map((e) => (
-                <tr key={e.id}>
+              {list.map((e) => {
+                const incomplete = isIncomplete(e);
+                const planned = plannedCount(e);
+                return (
+                <Fragment key={e.id}>
+                <tr>
                   <td style={{ whiteSpace: 'nowrap' }}>{fmt(e.at)}</td>
                   <td title={e.name}>
                     {e.name}
                     {e.reprintOf ? <span className="k"> · {t('réimpression')}</span> : null}
+                    {e.resumeOf ? <span className="k"> · {t('reprise')}</span> : null}
                     {e.source ? <span className="k"> · {e.source === 'url' ? t('lien') : e.source}</span> : null}
                   </td>
                   <td>{t(JOB_LABELS[e.kind])}</td>
-                  <td>{e.count}</td>
+                  <td style={incomplete ? { whiteSpace: 'nowrap', color: 'var(--err)', fontWeight: 700 } : undefined} title={incomplete ? t('{n} étiquette(s) sur {t} envoyée(s)', { n: e.count, t: planned }) : undefined}>
+                    {incomplete ? t('{x} / {n} étiquette(s)', { x: e.count, n: planned }) : e.count}
+                  </td>
                   <td title={e.rows.map((i) => i + 1).join(', ')}>{rowsLabel(e)}</td>
                   <td>
                     {Object.entries(e.prompts)
@@ -319,19 +372,18 @@ export function HistoryModal() {
                       .join(' · ')}
                   </td>
                   <td style={{ whiteSpace: 'nowrap' }}>
-                    <button
-                      className="btn sm flat"
-                      disabled={!!busy}
-                      title={t('Réimprimer à l’identique')}
-                      onClick={async () => {
-                        setBusy(e.id);
-                        try {
-                          if (await reprint(e)) refresh();
-                        } finally {
-                          setBusy('');
-                        }
-                      }}
-                    >
+                    {incomplete && (
+                      <button
+                        className="btn sm flat"
+                        disabled={!!busy}
+                        aria-expanded={resumeAt?.id === e.id}
+                        title={t('Renvoie les étiquettes à partir de ce numéro, avec les mêmes données, valeurs saisies et SSCC')}
+                        onClick={() => setResumeAt(resumeAt?.id === e.id ? null : { id: e.id, from: Math.min(planned, e.count + 1) })}
+                      >
+                        <Play size={14} /> {t('Reprendre à partir de l’étiquette…')}
+                      </button>
+                    )}
+                    <button className="btn sm flat" disabled={!!busy} title={t('Réimprimer à l’identique')} onClick={() => launch(e.id, () => reprint(e))}>
                       <RotateCcw size={14} /> {t('Réimprimer')}
                     </button>
                     <button
@@ -350,7 +402,37 @@ export function HistoryModal() {
                     </button>
                   </td>
                 </tr>
-              ))}
+                {resumeAt?.id === e.id && (
+                  <tr>
+                    <td colSpan={7}>
+                      <div className="row" style={{ alignItems: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+                        <div style={{ width: 130 }}>
+                          <NumField label={t('À partir de l’étiquette')} value={resumeAt.from} min={1} max={planned} decimals={0} onChange={(v) => setResumeAt({ id: e.id, from: Math.max(1, Math.min(planned, Math.round(v))) })} />
+                        </div>
+                        <span className="hint" style={{ margin: 0 }}>
+                          {t('Étiquettes {a} à {b} : mêmes données, valeurs saisies, date et SSCC.', { a: resumeAt.from, b: planned })}
+                        </span>
+                        <button
+                          className="btn sm accent"
+                          disabled={!!busy}
+                          onClick={() => {
+                            const from = resumeAt.from;
+                            setResumeAt(null);
+                            void launch(e.id, () => resumeHistory(e, from));
+                          }}
+                        >
+                          <Play size={14} /> {t('Reprendre')}
+                        </button>
+                        <button className="btn sm flat" onClick={() => setResumeAt(null)}>
+                          {tc('Annuler', 'cancel')}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -363,12 +445,19 @@ export function HistoryModal() {
 export function HelpModal() {
   const K = ({ k }: { k: string }) => <span className="kbd">{k}</span>;
   const rows: [string, string][] = [
-    ['Ctrl+Z', 'Annuler'],
+    ['Ctrl+Z', 'Annuler (80 étapes, effacées au rechargement de la page)'],
     ['Ctrl+Y / Ctrl+Maj+Z', 'Rétablir'],
     ['Ctrl+C / Ctrl+V', 'Copier / coller (images comprises)'],
+    ['Ctrl+Alt+C / Ctrl+Alt+V', 'Copier / coller la mise en forme (éléments du même type)'],
     ['Ctrl+D', 'Dupliquer'],
+    ['Alt+flèche', 'Dupliquer en décalant d’un pas de grille'],
     ['Ctrl+G / Ctrl+Maj+G', 'Grouper / dégrouper'],
+    ['Ctrl+] / Ctrl+[', 'Avancer / reculer d’un plan (AZERTY : Ctrl+$ / Ctrl+^)'],
+    ['Ctrl+Maj+] / Ctrl+Maj+[', 'Premier plan / arrière-plan'],
+    ['Ctrl+Maj+L', 'Verrouiller / déverrouiller'],
+    ['Ctrl+Maj+H', 'Masquer / afficher'],
     ['Ctrl+A', 'Tout sélectionner'],
+    ['Tab / Maj+Tab', 'Élément suivant / précédent (ordre des calques)'],
     ['Suppr', 'Supprimer la sélection'],
     ['Flèches', 'Déplacer de 1 point (Maj : 10 points)'],
     ['Ctrl + molette', 'Zoomer'],
@@ -552,13 +641,23 @@ export function PrintDialog() {
   const food = useFoodReport();
   const foodIssues = food.missing.length + food.dateIssues.length;
 
+  // la fenêtre se ferme dès que le travail entre dans la file (après la saisie des champs
+  // {{?…}}) : un envoi Zebra en pause ne la bloque pas, le panneau de la file prend le relais
   const run = async (onlyCurrent: boolean) => {
     setBusy(true);
+    let queued = false;
     try {
-      const n = await startJob(printer === 'zebra' ? 'zebra' : 'ordinateur', { onlyCurrent, copies });
-      if (n != null) closeModal();
+      const n = await runUntilQueued(
+        () => startJob(printer === 'zebra' ? 'zebra' : 'ordinateur', { onlyCurrent, copies }),
+        (ahead) => {
+          queued = true;
+          closeModal();
+          toastQueuedBehind(ahead);
+        },
+      );
+      if (n != null && !queued) closeModal();
     } finally {
-      setBusy(false);
+      if (!queued) setBusy(false);
     }
   };
 

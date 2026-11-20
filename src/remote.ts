@@ -12,7 +12,8 @@ import type { DataSet, LabelDoc } from './types';
 import { listSaved } from './actions';
 import { normalizeDoc } from './elements';
 import { batchJobs } from './render/resolve';
-import { startJob, type JobKind } from './jobs';
+import { startJobDetailed, type JobKind } from './jobs';
+import { enqueue, type QueueCtl } from './printQueue';
 import { prefGet, prefSet } from './storage';
 import { deepClone, uid } from './util';
 import { t } from './i18n';
@@ -133,16 +134,28 @@ function hasUnsavedWork(): boolean {
   return s.dirty && s.doc.elements.length > 0;
 }
 
-let queue: Promise<unknown> = Promise.resolve();
+const CANCELLED_BY_USER = 'annulé par l’utilisateur';
 
-/** Exécute une demande (une à la fois). */
-export function runRemote(job: RemoteJob): Promise<RemoteResult> {
-  const p = queue.then(() => runRemoteNow(job));
-  queue = p.catch(() => undefined);
-  return p;
+/**
+ * Exécute une demande. Les demandes passent par la file d'impression commune (une à la
+ * fois, avec les impressions lancées depuis l'éditeur) : visibles, annulables.
+ */
+export async function runRemote(job: RemoteJob): Promise<RemoteResult> {
+  const r = await enqueue({ name: job.modele || '?', kind: 'remote', source: job.source }, async (ctl) => {
+    let res: RemoteResult;
+    try {
+      res = await runRemoteNow(job, ctl);
+    } catch (e) {
+      res = { ok: false, count: 0, error: (e as Error)?.message || String(e) };
+    }
+    // (envoi interrompu, res.count > 0 : statut déjà fixé par le travail d'impression)
+    if (!res.ok && !res.count && !ctl.isCancelled()) ctl.finish(res.error === CANCELLED_BY_USER ? 'cancelled' : 'error', res.error);
+    return res;
+  });
+  return r ?? { ok: false, count: 0, error: CANCELLED_BY_USER };
 }
 
-async function runRemoteNow(job: RemoteJob): Promise<RemoteResult> {
+async function runRemoteNow(job: RemoteJob, ctl: QueueCtl): Promise<RemoteResult> {
   const st = useStore.getState();
   if (!job.modele) return { ok: false, count: 0, error: t('Paramètre « modele » manquant') };
   const doc = await findModel(job.modele);
@@ -150,6 +163,7 @@ async function runRemoteNow(job: RemoteJob): Promise<RemoteResult> {
     st.toast(t('Modèle « {m} » introuvable dans « Mes étiquettes »', { m: job.modele }), 'error');
     return { ok: false, count: 0, error: 'modele introuvable' };
   }
+  ctl.update({ name: doc.name });
   if (job.rows && !Array.isArray(job.rows)) return { ok: false, count: 0, error: 'rows doit être un tableau' };
   const target = (job.imprimer || '').toLowerCase();
   const kind = target ? TARGETS[target] : null;
@@ -164,8 +178,10 @@ async function runRemoteNow(job: RemoteJob): Promise<RemoteResult> {
   // Confirmation AVANT tout remplacement : toujours pour une impression non autorisée
   // d'avance, et pour une simple ouverture si l'étiquette en cours n'est pas enregistrée.
   if ((kind && !auto) || (!kind && unsaved)) {
+    ctl.update({ message: t('En attente de confirmation') });
     const ok = await confirmRemote(doc, kind, job.source, unsaved);
-    if (!ok) return { ok: false, count: 0, error: 'annulé par l’utilisateur' };
+    ctl.update({ message: undefined });
+    if (!ok) return { ok: false, count: 0, error: CANCELLED_BY_USER };
   }
   // Impression automatique alors que l'étiquette en cours n'est pas enregistrée :
   // on imprime le modèle sans remplacer le travail en cours.
@@ -178,8 +194,11 @@ async function runRemoteNow(job: RemoteJob): Promise<RemoteResult> {
   if (!kind) return { ok: true, count: 0 };
   if (kind === 'zebra') useStore.getState().set('printer', 'zebra');
   // le travail porte l'identifiant du modèle (valeurs saisies mémorisées, historique)
-  const n = await startJob(kind, { doc, prompts: job.prompts, source: job.source, currentRow: 0 });
-  return n == null ? { ok: false, count: 0, error: 'impression annulée ou en échec' } : { ok: true, count: n };
+  const r = await startJobDetailed(kind, { doc, prompts: job.prompts, source: job.source, currentRow: 0, queue: ctl });
+  if (!r) return { ok: false, count: 0, error: 'impression annulée ou en échec' };
+  // envoi Zebra interrompu : ok = false, count = étiquettes réellement envoyées
+  if (r.count < r.planned) return { ok: false, count: r.count, error: `interrompu : ${r.count}/${r.planned} étiquettes envoyées` };
+  return { ok: true, count: r.count };
 }
 
 /**

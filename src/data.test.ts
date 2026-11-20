@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import * as XLSX from 'xlsx';
 import { parseWorkbook, parseDelimited, parseDelimitedBytes, decodeText, numberToText, parseFile, reloadSheet, canSwitchSheet, MAX_ROWS } from './data';
+import { sortRows, filterRows, isValidGtinText, findRow, splitValue, splitCount, splitColumn, generateRanges, rangeCount, segmentValues, appendRows, type RowOp, type RangeSegment } from './data';
+import type { DataSet } from './types';
 import { parseDate, parseNumber } from './render/resolve';
 
 type CellSpec = XLSX.CellObject;
@@ -214,5 +216,171 @@ describe('CSV : lignes', () => {
 
   it('texte vide → erreur', () => {
     expect(() => parseDelimited('\n \n')).toThrow('Aucune donnée');
+  });
+});
+
+/** Jeu de données de test (colonnes = clés de la première ligne) */
+function ds(rows: Record<string, string>[], checked: boolean[] = []): DataSet {
+  return { columns: rows.length ? Object.keys(rows[0]) : [], rows, checked: rows.map((_, i) => !!checked[i]), copies: rows.map((_, i) => i + 1), source: 't' };
+}
+
+describe('sortRows (ordre naturel)', () => {
+  const d = ds(
+    [{ E: 'ZB1-01-10' }, { E: '' }, { E: 'ZB1-01-02' }, { E: 'ma2-01-01' }, { E: 'ZB1-01-02' }, { E: '/' }],
+    [true, false, false, true],
+  );
+  it('croissant : ZB1-01-02 avant ZB1-01-10, casse ignorée, vides à la fin, stable', () => {
+    const s = sortRows(d, 'E');
+    expect(s.rows.map((r) => r.E)).toEqual(['/', 'ma2-01-01', 'ZB1-01-02', 'ZB1-01-02', 'ZB1-01-10', '']);
+    // cases cochées et copies suivent leur ligne ; égalité → ordre d'origine
+    expect(s.checked).toEqual([false, true, false, false, true, false]);
+    expect(s.copies).toEqual([6, 4, 3, 5, 1, 2]);
+    expect(d.rows[0].E).toBe('ZB1-01-10'); // l'original n'est pas modifié
+  });
+  it('décroissant : vides toujours à la fin', () => {
+    expect(sortRows(d, 'E', 'desc').rows.map((r) => r.E)).toEqual(['ZB1-01-10', 'ZB1-01-02', 'ZB1-01-02', 'ma2-01-01', '/', '']);
+  });
+  it('nombres en ordre numérique', () => {
+    expect(sortRows(ds([{ n: '10' }, { n: '9' }, { n: '100' }]), 'n').rows.map((r) => r.n)).toEqual(['9', '10', '100']);
+  });
+});
+
+describe('filterRows', () => {
+  const d = ds([
+    { Ref: 'A', Ean: '2000000000015' },
+    { Ref: 'B', Ean: '2000000000016' },
+    { Ref: 'a', Ean: '' },
+    { Ref: 'C', Ean: '/' },
+    { Ref: 'D', Ean: '96385074' },
+  ]);
+  const f = (column: string, op: RowOp, value = '', query = '') => filterRows(d, { query, column, op, value });
+  it('≠, = et contient (sans casse ni accents)', () => {
+    expect(f('Ref', 'ne', 'a')).toEqual([1, 3, 4]);
+    expect(f('Ref', 'eq', 'A')).toEqual([0, 2]);
+    expect(f('Ean', 'contains', '20000')).toEqual([0, 1]);
+    expect(f('', 'contains', '', 'b')).toEqual([1]);
+  });
+  it('doublon : valeur non vide présente plusieurs fois', () => {
+    expect(f('Ref', 'dup')).toEqual([0, 2]);
+    expect(f('Ean', 'dup')).toEqual([]);
+  });
+  it('EAN/GTIN invalide : longueur 8/12/13/14 + clé, vides exclus', () => {
+    expect(f('Ean', 'badGtin')).toEqual([1, 3]);
+    expect(isValidGtinText('2000000000015')).toBe(true);
+    expect(isValidGtinText('96385074')).toBe(true);
+    expect(isValidGtinText('036000291452')).toBe(true);
+    expect(isValidGtinText('10614141000040')).toBe(true);
+    expect(isValidGtinText('1234567')).toBe(false);
+  });
+});
+
+describe('findRow (Aller à…)', () => {
+  const d = ds([{ E: 'ZB1-01-01-A1' }, { E: 'ZB1-01-01-A2' }, { E: 'ZB1-02-01-A1' }]);
+  it('numéro de ligne', () => {
+    expect(findRow(d, '2')).toEqual({ row: 1, rank: 1, count: 1 });
+  });
+  it('valeur : occurrence suivante, en boucle', () => {
+    expect(findRow(d, 'a1')).toEqual({ row: 0, rank: 1, count: 2 });
+    expect(findRow(d, 'a1', 0)).toEqual({ row: 2, rank: 2, count: 2 });
+    expect(findRow(d, 'a1', 2)).toEqual({ row: 0, rank: 1, count: 2 });
+    expect(findRow(d, 'zz')).toBeNull();
+    expect(findRow(d, '  ')).toBeNull();
+  });
+  it('nombre hors bornes : cherché comme valeur', () => {
+    expect(findRow(ds([{ E: 'A' }, { E: 'X-99' }]), '99')).toEqual({ row: 1, rank: 1, count: 1 });
+    expect(findRow(d, '99')).toBeNull();
+  });
+});
+
+describe('splitColumn (éclater une colonne)', () => {
+  it('mode cases : préfixe conservé, motifs lettre + chiffres', () => {
+    expect(splitValue('ZB1-04-03-B1B5C1C3', { kind: 'cases' })).toEqual(['ZB1-04-03-B1', 'ZB1-04-03-B5', 'ZB1-04-03-C1', 'ZB1-04-03-C3']);
+    expect(splitValue('ZB1-01-01-A1', { kind: 'cases' })).toEqual(['ZB1-01-01-A1']);
+    expect(splitValue('/', { kind: 'cases' })).toEqual(['/']);
+    expect(splitValue('ZB1-04-03-B1x', { kind: 'cases' })).toEqual(['ZB1-04-03-B1x']);
+  });
+  it('mode séparateur : morceaux sans espaces, vides ignorés', () => {
+    expect(splitValue('ART1000001 (CMR) / ART1000002', { kind: 'sep', sep: '/' })).toEqual(['ART1000001 (CMR)', 'ART1000002']);
+    expect(splitValue('a;;b', { kind: 'sep', sep: ';' })).toEqual(['a', 'b']);
+    expect(splitValue('/', { kind: 'sep', sep: '/' })).toEqual(['/']);
+  });
+  it('une ligne par valeur, autres colonnes, cases et copies recopiées', () => {
+    const d = ds([{ P: 'x', E: 'ZB1-04-03-B1B5' }, { P: 'y', E: 'ZB1-01-01-A1' }], [true, false]);
+    expect(splitCount(d, 'E', { kind: 'cases' })).toBe(3);
+    const r = splitColumn(d, 'E', { kind: 'cases' });
+    expect(r.truncated).toBe(0);
+    expect(r.data.rows).toEqual([
+      { P: 'x', E: 'ZB1-04-03-B1' },
+      { P: 'x', E: 'ZB1-04-03-B5' },
+      { P: 'y', E: 'ZB1-01-01-A1' },
+    ]);
+    expect(r.data.checked).toEqual([true, true, false]);
+    expect(r.data.copies).toEqual([1, 1, 2]);
+    expect(r.data.columns).toEqual(['P', 'E']);
+  });
+  it('plafond de lignes', () => {
+    const d = ds([{ E: 'a/b/c' }, { E: 'd/e' }]);
+    const r = splitColumn(d, 'E', { kind: 'sep', sep: '/' }, 4);
+    expect(r.data.rows.map((x) => x.E)).toEqual(['a', 'b', 'c', 'd']);
+    expect(r.truncated).toBe(1);
+  });
+});
+
+describe('generateRanges (générateur d’emplacements)', () => {
+  const segs: RangeSegment[] = [
+    { name: 'Zone', kind: 'text', value: 'ZB1' },
+    { name: 'Allée', kind: 'num', from: 1, to: 2, pad: 2 },
+    { name: 'Travée', kind: 'num', from: 9, to: 10, pad: 2 },
+    { name: 'Niveau', kind: 'alpha', from: 'A', to: 'B' },
+    { name: 'Position', kind: 'num', from: 1, to: 1, pad: 0 },
+  ];
+  it('produit cartésien, une colonne par segment + Emplacement formaté', () => {
+    const r = generateRanges(segs, '{Zone}-{Allée}-{Travée}-{Niveau}{Position}');
+    expect(r.total).toBe(8);
+    expect(rangeCount(segs)).toBe(8);
+    expect(r.columns).toEqual(['Zone', 'Allée', 'Travée', 'Niveau', 'Position', 'Emplacement']);
+    expect(r.rows.map((x) => x.Emplacement)).toEqual([
+      'ZB1-01-09-A1',
+      'ZB1-01-09-B1',
+      'ZB1-01-10-A1',
+      'ZB1-01-10-B1',
+      'ZB1-02-09-A1',
+      'ZB1-02-09-B1',
+      'ZB1-02-10-A1',
+      'ZB1-02-10-B1',
+    ]);
+    expect(r.rows[0]).toMatchObject({ Zone: 'ZB1', Allée: '01', Travée: '09', Niveau: 'A', Position: '1' });
+  });
+  it('plages décroissantes, lettres, modèle vide, champ inconnu', () => {
+    expect(segmentValues({ name: 'n', kind: 'num', from: 3, to: 1, pad: 0 })).toEqual(['3', '2', '1']);
+    expect(segmentValues({ name: 'l', kind: 'alpha', from: 'c', to: 'a' })).toEqual(['C', 'B', 'A']);
+    expect(segmentValues({ name: 'l', kind: 'alpha', from: '1', to: 'B' })).toEqual([]);
+    const r = generateRanges(segs.slice(0, 2), '');
+    expect(r.rows.map((x) => x.Emplacement)).toEqual(['ZB101', 'ZB102']);
+    expect(generateRanges(segs.slice(0, 1), '{Zone}/{X}').rows[0].Emplacement).toBe('ZB1/{X}');
+  });
+  it('plafond et noms en double', () => {
+    const big: RangeSegment[] = [
+      { name: 'A', kind: 'num', from: 1, to: 100, pad: 0 },
+      { name: 'A', kind: 'num', from: 1, to: 100, pad: 0 },
+    ];
+    const r = generateRanges(big, '', 'A', 50);
+    expect(r.total).toBe(10000);
+    expect(r.rows.length).toBe(50);
+    expect(r.columns).toEqual(['A', 'A_2', 'A_3']);
+  });
+  it('appendRows : ajoute ou crée, colonnes réunies, plafond', () => {
+    const d = ds([{ P: 'x' }], [true]);
+    const r = appendRows(d, ['E'], [{ E: '1' }, { E: '2' }], 'g', 2);
+    expect(r.data.columns).toEqual(['P', 'E']);
+    expect(r.data.rows).toEqual([
+      { P: 'x', E: '' },
+      { P: '', E: '1' },
+    ]);
+    expect(r.data.checked).toEqual([true, false]);
+    expect(r.truncated).toBe(1);
+    const n = appendRows(undefined, ['E'], [{ E: '1' }], 'Générateur');
+    expect(n.data.source).toBe('Générateur');
+    expect(n.data.rows).toEqual([{ E: '1' }]);
   });
 });
